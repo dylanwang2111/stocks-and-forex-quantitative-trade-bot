@@ -1,0 +1,546 @@
+"""
+portfolio/state.py
+In-memory portfolio state manager with SQLite persistence.
+
+Tracks open positions, computes available cash, handles close lifecycle,
+reconciles against broker-reported positions, and emits PortfolioSnapshot rows.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
+
+from database.models import PortfolioSnapshot, Trade, get_session
+from config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Position dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Position:
+    """Represents a single open position held in memory."""
+
+    symbol: str
+    broker: str
+    direction: str           # "long" | "short"
+    quantity: float
+    entry_price: float
+    stop_price: float
+    take_profit_price: float
+    confidence: float
+    position_tier: str
+    entry_time: datetime
+    db_trade_id: int
+
+    # ------------------------------------------------------------------
+    # Computed properties
+    # ------------------------------------------------------------------
+
+    def current_value(self, current_price: float) -> float:
+        """Market value of the position at *current_price* (always positive)."""
+        return current_price * self.quantity
+
+    def unrealized_pnl(self, current_price: float) -> float:
+        """Unrealized P&L in USD.
+
+        Long:  (current - entry) * qty
+        Short: (entry - current) * qty
+        """
+        if self.direction == "long":
+            return (current_price - self.entry_price) * self.quantity
+        else:  # short
+            return (self.entry_price - current_price) * self.quantity
+
+    # Convenience --------------------------------------------------------
+
+    def cost_basis(self) -> float:
+        """Capital deployed for this position (entry_price * quantity)."""
+        return self.entry_price * self.quantity
+
+    def __repr__(self) -> str:
+        return (
+            f"Position({self.symbol} {self.direction} qty={self.quantity} "
+            f"entry={self.entry_price:.4f} tier={self.position_tier})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# PortfolioStateManager
+# ---------------------------------------------------------------------------
+
+class PortfolioStateManager:
+    """Thread-safe in-memory portfolio tracker backed by SQLite.
+
+    Capital model
+    -------------
+    total_capital   = configured (settings.bot.total_capital)
+    cash_reserve    = 30% of total_capital (settings.bot.cash_reserve)  — never deployed
+    deployable      = 70% of total_capital (total_capital - cash_reserve)
+    deployed        = sum(entry_price * quantity) for open positions
+    available_cash  = deployable - deployed
+                    = total_capital - cash_reserve - deployed_capital()
+    """
+
+    def __init__(self, database_url: str | None = None) -> None:
+        self._database_url: str = database_url or settings.bot.database_url
+        self._positions: dict[str, Position] = {}
+        self._lock = threading.Lock()
+
+        self._total_capital: float = settings.bot.total_capital
+        self._cash_reserve: float = settings.bot.cash_reserve
+        self._max_positions: int = settings.bot.max_positions
+
+        logger.info(
+            "PortfolioStateManager initialised | capital=%.2f reserve=%.2f max_pos=%d db=%s",
+            self._total_capital,
+            self._cash_reserve,
+            self._max_positions,
+            self._database_url,
+        )
+
+    # ------------------------------------------------------------------
+    # Query helpers
+    # ------------------------------------------------------------------
+
+    def deployed_capital(self) -> float:
+        """Sum of (entry_price * quantity) for all open positions."""
+        with self._lock:
+            return sum(p.cost_basis() for p in self._positions.values())
+
+    def available_cash(self) -> float:
+        """Capital that can be used to open new positions.
+
+        = total_capital - cash_reserve - deployed_capital()
+        Never returns a value below 0.
+        """
+        avail = self._total_capital - self._cash_reserve - self.deployed_capital()
+        return max(avail, 0.0)
+
+    def position_count(self) -> int:
+        """Number of currently open positions."""
+        with self._lock:
+            return len(self._positions)
+
+    def get_position(self, symbol: str) -> Optional[Position]:
+        """Return the open Position for *symbol*, or None if not held."""
+        with self._lock:
+            return self._positions.get(symbol)
+
+    def all_positions(self) -> list[Position]:
+        """Return a snapshot list of all open positions."""
+        with self._lock:
+            return list(self._positions.values())
+
+    def can_open_position(self, symbol: str) -> bool:
+        """Return True only if both conditions are met:
+
+        1. We do not already hold *symbol*.
+        2. We have not reached *max_positions*.
+        """
+        with self._lock:
+            if symbol in self._positions:
+                logger.debug("can_open_position(%s) -> False: already held", symbol)
+                return False
+            if len(self._positions) >= self._max_positions:
+                logger.debug(
+                    "can_open_position(%s) -> False: at max_positions (%d)",
+                    symbol,
+                    self._max_positions,
+                )
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Mutations
+    # ------------------------------------------------------------------
+
+    def add_position(self, position: Position) -> None:
+        """Register a newly opened position in memory.
+
+        Does NOT write to the database — the caller is expected to have
+        already inserted the Trade row and obtained the db_trade_id before
+        calling this method.
+        """
+        with self._lock:
+            if position.symbol in self._positions:
+                raise ValueError(
+                    f"add_position: {position.symbol} is already tracked. "
+                    "Close the existing position before adding a new one."
+                )
+            self._positions[position.symbol] = position
+
+        logger.info("Position added: %r", position)
+
+    def close_position(
+        self,
+        symbol: str,
+        exit_price: float,
+        exit_time: datetime,
+    ) -> None:
+        """Close an open position and persist the outcome to the database.
+
+        Computes P&L:
+            Long:  pnl_usd = (exit_price - entry_price) * quantity
+            Short: pnl_usd = (entry_price - exit_price) * quantity
+            pnl_pct = pnl_usd / (entry_price * quantity)
+
+        Updates the Trade row: exit_price, exit_time, pnl_usd, pnl_pct,
+        status="closed".  Removes the position from the in-memory dict.
+        """
+        with self._lock:
+            position = self._positions.get(symbol)
+            if position is None:
+                raise KeyError(f"close_position: no open position found for '{symbol}'")
+
+        # Compute P&L outside the lock (pure arithmetic)
+        if position.direction == "long":
+            pnl_usd = (exit_price - position.entry_price) * position.quantity
+        else:  # short
+            pnl_usd = (position.entry_price - exit_price) * position.quantity
+
+        cost_basis = position.entry_price * position.quantity
+        pnl_pct = pnl_usd / cost_basis if cost_basis != 0.0 else 0.0
+
+        # Persist to DB
+        session = get_session(self._database_url)
+        try:
+            trade = session.get(Trade, position.db_trade_id)
+            if trade is None:
+                logger.error(
+                    "close_position: Trade id=%d not found in DB for %s",
+                    position.db_trade_id,
+                    symbol,
+                )
+            else:
+                trade.exit_price = exit_price
+                trade.exit_time = exit_time
+                trade.pnl_usd = round(pnl_usd, 6)
+                trade.pnl_pct = round(pnl_pct, 6)
+                trade.status = "closed"
+                session.commit()
+                logger.info(
+                    "Trade id=%d closed | %s %s exit=%.4f pnl=%.2f (%.2f%%)",
+                    position.db_trade_id,
+                    symbol,
+                    position.direction,
+                    exit_price,
+                    pnl_usd,
+                    pnl_pct * 100,
+                )
+        except Exception:
+            session.rollback()
+            logger.exception("close_position: DB update failed for %s", symbol)
+            raise
+        finally:
+            session.close()
+
+        # Remove from memory after successful DB write
+        with self._lock:
+            self._positions.pop(symbol, None)
+
+    def sync_from_broker(self, broker_positions: list[dict]) -> None:
+        """Reconcile in-memory state with broker-reported positions.
+
+        Each element of *broker_positions* must contain:
+            { "symbol": str, "quantity": float, "avg_price": float, "direction": str }
+
+        Behaviour:
+        - Warns when an in-memory position is absent from the broker list
+          (position may have been closed externally or hit a stop).
+        - Warns when the broker reports a position we do not have in memory
+          (could indicate a manual trade or a missed open event).
+        - Does NOT auto-mutate positions to avoid silent data corruption;
+          the caller should act on warnings and call add_position /
+          close_position explicitly if reconciliation is needed.
+        """
+        broker_symbols: set[str] = {p["symbol"] for p in broker_positions}
+
+        with self._lock:
+            memory_symbols: set[str] = set(self._positions.keys())
+
+        missing_from_broker = memory_symbols - broker_symbols
+        missing_from_memory = broker_symbols - memory_symbols
+
+        for sym in missing_from_broker:
+            logger.warning(
+                "sync_from_broker: '%s' is tracked in memory but NOT reported by broker. "
+                "Possible external close or stop hit. Investigate and call close_position() if needed.",
+                sym,
+            )
+
+        for sym in missing_from_memory:
+            logger.warning(
+                "sync_from_broker: '%s' is reported by broker but NOT in memory. "
+                "Possible manual trade or missed open event. Investigate and call add_position() if needed.",
+                sym,
+            )
+
+        if not missing_from_broker and not missing_from_memory:
+            logger.debug("sync_from_broker: in-memory state matches broker (%d positions).", len(memory_symbols))
+
+    # ------------------------------------------------------------------
+    # Reporting
+    # ------------------------------------------------------------------
+
+    def daily_pnl(self) -> float:
+        """Sum of pnl_usd for all Trade rows closed today (UTC)."""
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        # Strip timezone for comparison with naive DB datetimes
+        today_start_naive = today_start.replace(tzinfo=None)
+
+        session = get_session(self._database_url)
+        try:
+            trades_today = (
+                session.query(Trade)
+                .filter(
+                    Trade.status == "closed",
+                    Trade.exit_time >= today_start_naive,
+                )
+                .all()
+            )
+            total = sum(t.pnl_usd for t in trades_today if t.pnl_usd is not None)
+            return round(total, 6)
+        except Exception:
+            logger.exception("daily_pnl: DB query failed")
+            return 0.0
+        finally:
+            session.close()
+
+    def snapshot(self) -> dict:
+        """Return current portfolio state as a plain dict.
+
+        Matches the columns of the PortfolioSnapshot model so the caller
+        can pass this directly to save_snapshot() or log it.
+        """
+        with self._lock:
+            positions_detail = [
+                {
+                    "symbol": p.symbol,
+                    "broker": p.broker,
+                    "direction": p.direction,
+                    "quantity": p.quantity,
+                    "entry_price": p.entry_price,
+                    "stop_price": p.stop_price,
+                    "take_profit_price": p.take_profit_price,
+                    "confidence": p.confidence,
+                    "position_tier": p.position_tier,
+                    "entry_time": p.entry_time.isoformat(),
+                    "db_trade_id": p.db_trade_id,
+                    "cost_basis": round(p.cost_basis(), 4),
+                }
+                for p in self._positions.values()
+            ]
+            open_count = len(self._positions)
+
+        deployed = self.deployed_capital()
+        cash = self.available_cash()
+        total_equity = self._total_capital  # unrealized P&L not included without live prices
+        d_pnl = self.daily_pnl()
+
+        return {
+            "timestamp": datetime.utcnow(),
+            "total_equity": round(total_equity, 4),
+            "cash": round(cash, 4),
+            "open_positions": open_count,
+            "daily_pnl": round(d_pnl, 6),
+            "weekly_pnl": None,       # populated by caller if needed
+            "drawdown_pct": None,     # populated by caller if needed
+            "positions_detail": positions_detail,
+        }
+
+    def save_snapshot(self) -> None:
+        """Write a PortfolioSnapshot row to the database."""
+        data = self.snapshot()
+        session = get_session(self._database_url)
+        try:
+            snap = PortfolioSnapshot(
+                timestamp=data["timestamp"],
+                total_equity=data["total_equity"],
+                cash=data["cash"],
+                open_positions=data["open_positions"],
+                daily_pnl=data["daily_pnl"],
+                weekly_pnl=data["weekly_pnl"],
+                drawdown_pct=data["drawdown_pct"],
+                positions_detail=data["positions_detail"],
+            )
+            session.add(snap)
+            session.commit()
+            logger.info(
+                "Snapshot saved | equity=%.2f cash=%.2f positions=%d daily_pnl=%.4f",
+                data["total_equity"],
+                data["cash"],
+                data["open_positions"],
+                data["daily_pnl"],
+            )
+        except Exception:
+            session.rollback()
+            logger.exception("save_snapshot: DB write failed")
+            raise
+        finally:
+            session.close()
+
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+def test_portfolio_state() -> None:
+    """Smoke-test PortfolioStateManager with two positions.
+
+    Verifies:
+    - available_cash() after opening 2 positions
+    - can_open_position() returns False when at max_positions limit
+    - can_open_position() returns False for a symbol already held
+    """
+    import tempfile, os
+
+    db_path = os.path.join(tempfile.gettempdir(), "test_portfolio_state.db")
+    db_url = f"sqlite:///{db_path}"
+
+    # Initialise tables
+    from database.models import init_db
+    init_db(db_url)
+
+    mgr = PortfolioStateManager(database_url=db_url)
+
+    # Confirm clean slate
+    assert mgr.available_cash() == 350.0, (
+        f"Expected 350.0, got {mgr.available_cash()}"
+    )
+    assert mgr.can_open_position("SPY"), "Should be able to open SPY on clean slate"
+
+    # Insert two Trade rows so we have valid db_trade_id values
+    session = get_session(db_url)
+    try:
+        now = datetime.utcnow()
+        t1 = Trade(
+            symbol="SPY", broker="alpaca", direction="long",
+            entry_price=500.0, quantity=0.2, confidence=70.0,
+            position_tier="tier2", entry_time=now, status="open",
+        )
+        t2 = Trade(
+            symbol="EURUSD", broker="oanda", direction="short",
+            entry_price=1.08, quantity=1000.0, confidence=65.0,
+            position_tier="tier1", entry_time=now, status="open",
+        )
+        session.add_all([t1, t2])
+        session.commit()
+        t1_id, t2_id = t1.id, t2.id
+    finally:
+        session.close()
+
+    # Position 1: SPY long, cost = 500.0 * 0.2 = $100
+    pos1 = Position(
+        symbol="SPY",
+        broker="alpaca",
+        direction="long",
+        quantity=0.2,
+        entry_price=500.0,
+        stop_price=490.0,
+        take_profit_price=520.0,
+        confidence=70.0,
+        position_tier="tier2",
+        entry_time=datetime.utcnow(),
+        db_trade_id=t1_id,
+    )
+    mgr.add_position(pos1)
+
+    # Position 2: EUR/USD short, cost = 1.08 * 1000 = $1080 (over capital but
+    #   for forex the notional is leveraged; in our model we track margin not
+    #   notional, so use a small margin-equivalent qty for the test)
+    pos2 = Position(
+        symbol="EURUSD",
+        broker="oanda",
+        direction="short",
+        quantity=10.0,       # $10.80 cost basis for test purposes
+        entry_price=1.08,
+        stop_price=1.09,
+        take_profit_price=1.06,
+        confidence=65.0,
+        position_tier="tier1",
+        entry_time=datetime.utcnow(),
+        db_trade_id=t2_id,
+    )
+    mgr.add_position(pos2)
+
+    # deployed = 100 + 10.80 = 110.80
+    # available = 500 - 150 - 110.80 = 239.20
+    expected_cash = round(500.0 - 150.0 - (500.0 * 0.2) - (1.08 * 10.0), 6)
+    actual_cash = mgr.available_cash()
+    assert abs(actual_cash - expected_cash) < 0.0001, (
+        f"available_cash mismatch: expected {expected_cash}, got {actual_cash}"
+    )
+
+    # At max_positions (2): cannot open any new symbol
+    assert not mgr.can_open_position("QQQ"), (
+        "can_open_position should be False when at max_positions"
+    )
+
+    # Already-held symbol also blocked
+    assert not mgr.can_open_position("SPY"), (
+        "can_open_position should be False for already-held symbol"
+    )
+
+    # Verify position_count
+    assert mgr.position_count() == 2, f"Expected 2, got {mgr.position_count()}"
+
+    # Close SPY position
+    exit_time = datetime.utcnow()
+    mgr.close_position("SPY", exit_price=510.0, exit_time=exit_time)
+    assert mgr.get_position("SPY") is None, "SPY should be removed after close"
+    assert mgr.position_count() == 1
+
+    # After closing SPY: available_cash should increase by cost_basis of SPY ($100)
+    expected_cash_after = round(500.0 - 150.0 - (1.08 * 10.0), 6)
+    actual_cash_after = mgr.available_cash()
+    assert abs(actual_cash_after - expected_cash_after) < 0.0001, (
+        f"available_cash after close mismatch: expected {expected_cash_after}, got {actual_cash_after}"
+    )
+
+    # Now we can open a new position again
+    assert mgr.can_open_position("QQQ"), (
+        "can_open_position should be True after closing one position"
+    )
+
+    # snapshot() returns correct structure
+    snap = mgr.snapshot()
+    assert snap["open_positions"] == 1
+    assert snap["cash"] == round(actual_cash_after, 4)
+    assert len(snap["positions_detail"]) == 1
+    assert snap["positions_detail"][0]["symbol"] == "EURUSD"
+
+    # Verify DB trade was updated correctly
+    session = get_session(db_url)
+    try:
+        closed_trade = session.get(Trade, t1_id)
+        assert closed_trade.status == "closed"
+        assert closed_trade.exit_price == 510.0
+        # long pnl = (510 - 500) * 0.2 = 2.0
+        assert abs(closed_trade.pnl_usd - 2.0) < 0.0001, (
+            f"pnl_usd expected 2.0, got {closed_trade.pnl_usd}"
+        )
+        # pnl_pct = 2.0 / (500 * 0.2) = 0.02
+        assert abs(closed_trade.pnl_pct - 0.02) < 0.0001, (
+            f"pnl_pct expected 0.02, got {closed_trade.pnl_pct}"
+        )
+    finally:
+        session.close()
+
+    # Cleanup
+    os.remove(db_path)
+
+    print("test_portfolio_state: ALL ASSERTIONS PASSED")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    test_portfolio_state()
