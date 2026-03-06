@@ -33,7 +33,7 @@ from database.models import SignalLog, get_session
 from events.event_guard import EventGuard
 from portfolio.pdt_tracker import PDTTracker
 from portfolio.state import PortfolioStateManager
-from portfolio.watchlist import UNIVERSE, Instrument
+from portfolio.watchlist import get_universe_snapshot, Instrument
 from regime.detector import RegimeContext, RegimeDetector
 from resilience.correlation_guard import CorrelationGuard
 
@@ -132,7 +132,7 @@ class Scanner:
 
         results: list[ScanResult] = []
 
-        for instrument in UNIVERSE:
+        for instrument in get_universe_snapshot():
             if instrument.broker in skip_brokers:
                 logger.debug(
                     "scan_all: skipping %s — broker '%s' is down",
@@ -394,6 +394,7 @@ class Scanner:
             regime=regime.regime.value,
             position_tier=result.position_tier.value,
             raw_votes=bundle.votes(),
+            macro_risk_level=bundle.cat8.params.get("risk_level"),
         )
 
         kwargs = {}

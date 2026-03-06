@@ -4,7 +4,8 @@
       "Bash(python3:*)",
       "Bash(pip3 install:*)",
       "Bash(pip3 show:*)",
-      "Bash(pip3:*)"
+      "Bash(pip3:*)",
+      "Bash(ls:*)"
     ]
   }
 }

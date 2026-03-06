@@ -47,6 +47,69 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def bulk_fetch_daily(
+    symbols: list[str],
+    start: str,
+    end: str,
+) -> dict[str, "pd.DataFrame"]:
+    """
+    Download daily OHLCV for all symbols in a single yfinance API call.
+    Returns {symbol: DataFrame} mapping. Symbols that fail are omitted.
+    Falls back to an empty dict on total failure.
+    """
+    import pandas as pd
+    import yfinance as yf
+    from data.fetcher import _SYMBOL_MAP
+
+    yf_symbols = [_SYMBOL_MAP.get(s.upper(), s.upper()) for s in symbols]
+    sym_to_yf   = {s.upper(): _SYMBOL_MAP.get(s.upper(), s.upper()) for s in symbols}
+    yf_to_sym   = {v: k for k, v in sym_to_yf.items()}
+
+    print(f"  Bulk-fetching {len(yf_symbols)} symbols from {start} to {end}…", flush=True)
+    try:
+        raw = yf.download(
+            yf_symbols,
+            start=start,
+            end=end,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            multi_level_index=True,
+        )
+    except Exception as exc:
+        print(f"  Bulk fetch failed: {exc}")
+        return {}
+
+    if raw.empty:
+        print("  Bulk fetch returned empty data.")
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    for yf_sym in yf_symbols:
+        orig_sym = yf_to_sym.get(yf_sym, yf_sym)
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                df = raw.xs(yf_sym, level=1, axis=1).copy()
+            else:
+                df = raw.copy()
+
+            df.columns = [c.lower() for c in df.columns]
+            df = df[["open", "high", "low", "close", "volume"]].copy()
+
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC")
+            else:
+                df.index = df.index.tz_convert("UTC")
+
+            df = df.dropna(subset=["close"])
+            if not df.empty:
+                result[orig_sym] = df
+        except Exception as exc:
+            print(f"  Warning: could not slice {yf_sym} ({orig_sym}): {exc}")
+
+    return result
+
+
 def print_summary_table(results: list) -> None:
     """Print a formatted summary table of BacktestResult objects."""
     if not results:
@@ -79,7 +142,7 @@ def print_summary_table(results: list) -> None:
     print("-" * 80)
     passed = [r for r in results if r.passed()]
     print(f"\n  {len(passed)}/{len(results)} instruments passed minimum thresholds")
-    print(f"  (Sharpe > 1.5, MaxDD < 15%, Trades ≥ 30)\n")
+    print(f"  (Sharpe > 1.2, MaxDD < 20%, Trades ≥ 15 — daily-bar proxy thresholds)\n")
 
 
 def run_single_backtest(symbol: str, args: argparse.Namespace) -> None:
@@ -144,12 +207,16 @@ def main() -> None:
                 holding_days=args.holding_days,
             )
 
+            START, END = "2022-01-01", "2024-12-31"
+            prefetched = bulk_fetch_daily(symbols, START, END)
+
             all_results = []
             for sym in symbols:
                 print(f"  Testing {sym}...", end=" ", flush=True)
                 t0 = time.time()
                 try:
-                    result = runner.run(sym, start="2022-01-01", end="2024-12-31")
+                    df = prefetched.get(sym)
+                    result = runner.run(sym, start=START, end=END, df=df)
                     elapsed = time.time() - t0
                     print(f"Sharpe={result.sharpe:.2f}, Trades={result.trade_count} ({elapsed:.1f}s)")
                     all_results.append(result)

@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  tradebot:
+    build: .
+    container_name: trade-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - trade_data:/data
+    environment:
+      - DATABASE_URL=sqlite:////data/trade_bot.db
+    command: ["python", "main.py", "--mode", "paper"]
+
+  dashboard:
+    build: .
+    container_name: trade-bot-dashboard
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - trade_data:/data
+    environment:
+      - DATABASE_URL=sqlite:////data/trade_bot.db
+    ports:
+      - "8501:8501"
+    command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    depends_on:
+      - tradebot
+
+volumes:
+  trade_data:

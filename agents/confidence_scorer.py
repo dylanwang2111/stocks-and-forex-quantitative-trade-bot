@@ -41,26 +41,28 @@ class PositionTier(Enum):
 
 @dataclass
 class ConfidenceResult:
-    bull_score:     float           # 0–100
-    bear_score:     float           # 0–100
-    direction:      str             # "long" | "short" | "neutral"
-    dominant_score: float           # max(bull, bear)
-    position_tier:  PositionTier
-    breakdown:      dict            # per-category weighted contributions
+    bull_score:       float           # 0–100
+    bear_score:       float           # 0–100
+    direction:        str             # "long" | "short" | "neutral"
+    dominant_score:   float           # max(bull, bear)
+    position_tier:    PositionTier
+    breakdown:        dict            # per-category weighted contributions
+    macro_multiplier: float = 1.0    # HIGH→0.5, MEDIUM→0.75, LOW→1.0
 
     def tradeable(self) -> bool:
         return self.position_tier not in (PositionTier.NO_TRADE, PositionTier.WATCH)
 
     def to_dict(self) -> dict:
         return {
-            "bull_score":     round(self.bull_score, 1),
-            "bear_score":     round(self.bear_score, 1),
-            "direction":      self.direction,
-            "dominant_score": round(self.dominant_score, 1),
-            "position_tier":  self.position_tier.value,
-            "size_fraction":  self.position_tier.size_fraction(),
-            "tradeable":      self.tradeable(),
-            "breakdown":      self.breakdown,
+            "bull_score":       round(self.bull_score, 1),
+            "bear_score":       round(self.bear_score, 1),
+            "direction":        self.direction,
+            "dominant_score":   round(self.dominant_score, 1),
+            "position_tier":    self.position_tier.value,
+            "size_fraction":    self.position_tier.size_fraction(),
+            "tradeable":        self.tradeable(),
+            "macro_multiplier": self.macro_multiplier,
+            "breakdown":        self.breakdown,
         }
 
 
@@ -155,6 +157,11 @@ class ConfidenceScorer:
         else:
             tier = self._score_to_tier(dominant_score)
 
+        # ── Macro risk multiplier from Cat8 params ─────────────────────────────
+        _MACRO_MULT = {"HIGH": 0.5, "MEDIUM": 0.75, "LOW": 1.0}
+        risk_level = bundle.cat8.params.get("risk_level", "LOW").upper()
+        macro_multiplier = _MACRO_MULT.get(risk_level, 1.0)
+
         return ConfidenceResult(
             bull_score=bull_score,
             bear_score=bear_score,
@@ -162,6 +169,7 @@ class ConfidenceScorer:
             dominant_score=dominant_score,
             position_tier=tier,
             breakdown=breakdown,
+            macro_multiplier=macro_multiplier,
         )
 
     def _score_to_tier(self, score: float) -> PositionTier:

@@ -38,6 +38,7 @@ from events.event_guard import EventGuard
 from agents.risk_agent import RiskAgent, RiskParams
 from agents.execution_agent import ExecutionAgent, OrderResult
 from agents.portfolio_agent import PortfolioAgent
+from agents.pre_screen_agent import PreScreenAgent
 from notifications.telegram import TelegramNotifier
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,7 @@ class Orchestrator:
 
         # ── Portfolio selection agent ─────────────────────────────────────────
         self._portfolio_agent = PortfolioAgent()
+        self._pre_screen_agent = PreScreenAgent()
 
         # ── Scanner (imported lazily to decouple; raises ImportError if missing) ─
         self._scanner = self._build_scanner()
@@ -242,6 +244,34 @@ class Orchestrator:
             "Reconnect sync: %d open position(s) in memory — verify against broker",
             len(open_positions),
         )
+
+    def _daily_prescreen(self) -> None:
+        """
+        Run PreScreenAgent.screen() to refresh the active UNIVERSE from the full
+        CANDIDATE_POOL. Called daily at 05:00 UTC (except Monday — the weekly
+        PortfolioAgent selection at 00:00 Monday takes precedence).
+        Failures are swallowed so the bot never dies from a pre-screen error.
+        """
+        # Monday guard: weekly selection already ran at 00:00; skip pre-screen
+        if datetime.utcnow().weekday() == 0:
+            logger.info("_daily_prescreen: Monday — skipping (weekly selection is authoritative)")
+            return
+
+        try:
+            selected = self._pre_screen_agent.screen()
+            if selected:
+                logger.info(
+                    "Daily pre-screen updated universe: %d instruments — %s",
+                    len(selected),
+                    ", ".join(i.symbol for i in selected),
+                )
+                self._notifier.notify_portfolio_updated(selected)
+            else:
+                logger.warning(
+                    "_daily_prescreen: no instruments selected — keeping current universe"
+                )
+        except Exception:
+            logger.exception("_daily_prescreen: pre-screen agent failed; keeping current universe")
 
     def _select_portfolio(self) -> None:
         """
@@ -346,6 +376,15 @@ class Orchestrator:
             trigger=CronTrigger(day_of_week="mon", hour=0, minute=0, timezone="UTC"),
             id="portfolio_selection",
             name="Weekly portfolio selection",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+
+        self._scheduler.add_job(
+            func=self._daily_prescreen,
+            trigger=CronTrigger(hour=5, minute=0, timezone="UTC"),
+            id="daily_prescreen",
+            name="Daily pre-screen",
             replace_existing=True,
             misfire_grace_time=3600,
         )
@@ -466,6 +505,19 @@ class Orchestrator:
             logger.info("Cycle #%d: no scan results returned.", self._cycle_count)
             self._log_cycle_summary(cycle_start, skipped=False)
             return
+
+        # Notify Telegram of top signals (only on cycles that find something actionable)
+        try:
+            tg_results = [
+                {"symbol": r.symbol, "direction": getattr(r.confidence_result, "direction", "?"),
+                 "score": getattr(r.confidence_result, "score", 0)}
+                for r in scan_results
+                if hasattr(r, "confidence_result") and r.confidence_result is not None
+            ]
+            if tg_results:
+                self._notifier.notify_scan_result(tg_results)
+        except Exception:
+            pass  # never block trading loop for notification errors
 
         opportunity = self._scanner.top_opportunity(scan_results)
         if opportunity is None:
@@ -641,6 +693,7 @@ class Orchestrator:
             logger.info(
                 "_attempt_entry: %s blocked by EventGuard — %s", symbol, block_reason
             )
+            self._notifier.notify_event_guard(symbol, block_reason)
             return
 
         # ── Guard 4: correlation ───────────────────────────────────────────────
@@ -656,16 +709,21 @@ class Orchestrator:
             return
 
         # ── Guard 5: PDT rule ─────────────────────────────────────────────────
-        if asset_type == "stock" and not self._pdt_tracker.can_day_trade():
-            logger.info(
-                "_attempt_entry: %s skipped — PDT day-trade limit reached "
-                "(use swing mode for stocks).",
-                symbol,
-            )
-            # We do NOT return — swing trades are still allowed.
-            # The PDT check is only relevant for same-day (intraday) closings.
-            # For swing entries (held overnight) we let the trade proceed.
-            # Log the warning and continue.
+        if asset_type == "stock":
+            pdt_count = self._pdt_tracker.count_day_trades_rolling()
+            pdt_limit = self._pdt_tracker.PDT_LIMIT
+            if pdt_count >= pdt_limit - 1:  # warn at 2/3 or 3/3
+                self._notifier.notify_pdt_warning(pdt_count, pdt_limit)
+            if not self._pdt_tracker.can_day_trade():
+                logger.info(
+                    "_attempt_entry: %s skipped — PDT day-trade limit reached "
+                    "(use swing mode for stocks).",
+                    symbol,
+                )
+                # We do NOT return — swing trades are still allowed.
+                # The PDT check is only relevant for same-day (intraday) closings.
+                # For swing entries (held overnight) we let the trade proceed.
+                # Log the warning and continue.
 
         # ── Get current price ──────────────────────────────────────────────────
         current_price = self._get_current_price(symbol)

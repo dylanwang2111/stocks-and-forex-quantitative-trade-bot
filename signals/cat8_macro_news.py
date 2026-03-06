@@ -1,10 +1,14 @@
 """
 signals/cat8_macro_news.py
 Category 8: Macro / News Sentiment
-Gemini Flash 2.0 analysis of recent headlines via Yahoo Finance RSS feed.
-Gracefully stubs if GEMINI_API_KEY is not set.
-Rate-limited: cached 60 min per instrument.
+LLM analysis of recent headlines via Yahoo Finance RSS feed.
 
+LLM priority:
+  1. Gemini Flash 2.0 — if GEMINI_API_KEY is set.
+  2. Groq Llama 3.3 70B — elif GROQ_API_KEY is set (free tier).
+  3. Disabled — vote=0 if neither key is configured.
+
+Rate-limited: cached 60 min per instrument.
 News source: Yahoo Finance RSS (free, no API key required).
 IBKR does not provide a news API for algorithmic use.
 """
@@ -20,9 +24,9 @@ from signals import SignalResult
 
 # ── Cache (60 min TTL per symbol) ──────────────────────────────────────────────
 _CACHE: dict[str, tuple[float, SignalResult]] = {}
-_CACHE_TTL = 3600  # 60 minutes
+_CACHE_TTL = 900  # 15 minutes
 
-_DISABLED_RESULT = SignalResult(0, "LLM disabled — GEMINI_API_KEY not set", {})
+_DISABLED_RESULT = SignalResult(0, "LLM disabled — set GEMINI_API_KEY or GROQ_API_KEY", {})
 _NO_HEADLINES    = SignalResult(0, "No recent headlines available", {})
 
 # Yahoo Finance RSS — free, no key required
@@ -39,8 +43,13 @@ Based ONLY on these headlines, classify the SHORT-TERM (next 4–8 hours) market
 - BEARISH: headlines suggest downward price pressure
 - NEUTRAL: mixed, unclear, or irrelevant headlines
 
+Also classify the MACRO RISK LEVEL:
+- HIGH: active war/conflict, imminent FOMC, major geopolitical shock
+- MEDIUM: trade tensions, political uncertainty, mixed macro signals
+- LOW: calm markets, no major macro event, clear directional news
+
 Respond with a JSON object ONLY (no markdown):
-{{"sentiment": "BULLISH"|"BEARISH"|"NEUTRAL", "confidence": 0-100, "reason": "one sentence"}}
+{{"sentiment": "BULLISH"|"BEARISH"|"NEUTRAL", "confidence": 0-100, "risk_level": "HIGH"|"MEDIUM"|"LOW", "reason": "one sentence"}}
 """
 
 
@@ -67,24 +76,35 @@ def evaluate(symbol: str) -> SignalResult:
 def _evaluate_internal(symbol: str) -> SignalResult:
     from config.settings import settings
 
-    if not settings.gemini.enabled:
-        return _DISABLED_RESULT
-
-    # ── Fetch headlines from Yahoo Finance RSS ─────────────────────────────────
+    # ── Fetch headlines from Yahoo Finance RSS (shared by all LLM backends) ────
     headlines: list[str] = []
     try:
         headlines = _fetch_yf_rss(symbol)
     except Exception:
-        pass  # fall through to macro-only Gemini call
+        pass  # fall through to macro-only LLM call
 
-    # ── Analyse with Gemini ────────────────────────────────────────────────────
-    try:
-        if headlines:
-            return _analyse_with_gemini(symbol, headlines, settings)
-        else:
-            return _macro_only_gemini(symbol, settings)
-    except Exception as e:
-        return SignalResult(0, f"Gemini analysis failed: {e}", {"error": str(e)})
+    # ── 1. Try Gemini ──────────────────────────────────────────────────────────
+    if settings.gemini.enabled:
+        try:
+            if headlines:
+                return _analyse_with_gemini(symbol, headlines, settings)
+            else:
+                return _macro_only_gemini(symbol, settings)
+        except Exception as e:
+            return SignalResult(0, f"Gemini analysis failed: {e}", {"error": str(e)})
+
+    # ── 2. Try Groq ────────────────────────────────────────────────────────────
+    if settings.groq.enabled:
+        try:
+            if headlines:
+                return _analyse_with_groq(symbol, headlines, settings)
+            else:
+                return _macro_only_groq(symbol, settings)
+        except Exception as e:
+            return SignalResult(0, f"Groq analysis failed: {e}", {"error": str(e)})
+
+    # ── 3. Neither key configured ──────────────────────────────────────────────
+    return _DISABLED_RESULT
 
 
 def _fetch_yf_rss(symbol: str) -> list[str]:
@@ -108,7 +128,7 @@ def _macro_only_gemini(symbol: str, settings: Any) -> SignalResult:
     prompt = (
         f"In one sentence, what is the current macro market sentiment for {symbol}? "
         f'Respond with JSON only: {{"sentiment": "BULLISH"|"BEARISH"|"NEUTRAL", '
-        f'"confidence": 0-100, "reason": "..."}}'
+        f'"confidence": 0-100, "risk_level": "HIGH"|"MEDIUM"|"LOW", "reason": "..."}}'
     )
     response = model.generate_content(prompt)
     return _parse_gemini_response(response.text, symbol, source="macro_only")
@@ -125,6 +145,50 @@ def _analyse_with_gemini(symbol: str, headlines: list[str], settings: Any) -> Si
 
     response = model.generate_content(prompt)
     return _parse_gemini_response(response.text, symbol, source="yahoo_rss", headlines=headlines)
+
+
+def _macro_only_groq(symbol: str, settings: Any) -> SignalResult:
+    """Ask Groq/Llama for macro context when no headlines are available."""
+    try:
+        from groq import Groq
+    except ImportError:
+        return SignalResult(0, "Groq package not installed — run: pip install groq", {})
+
+    client = Groq(api_key=settings.groq.api_key)
+    prompt = (
+        f"In one sentence, what is the current macro market sentiment for {symbol}? "
+        f'Respond with JSON only: {{"sentiment": "BULLISH"|"BEARISH"|"NEUTRAL", '
+        f'"confidence": 0-100, "risk_level": "HIGH"|"MEDIUM"|"LOW", "reason": "..."}}'
+    )
+    completion = client.chat.completions.create(
+        model=settings.groq.model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=200,
+    )
+    text = completion.choices[0].message.content
+    return _parse_gemini_response(text, symbol, source="macro_only")
+
+
+def _analyse_with_groq(symbol: str, headlines: list[str], settings: Any) -> SignalResult:
+    """Analyse headlines with Groq/Llama 3.3 70B."""
+    try:
+        from groq import Groq
+    except ImportError:
+        return SignalResult(0, "Groq package not installed — run: pip install groq", {})
+
+    client = Groq(api_key=settings.groq.api_key)
+    headline_text = "\n".join(f"- {h}" for h in headlines)
+    prompt = _GEMINI_PROMPT.format(symbol=symbol, headlines=headline_text)
+
+    completion = client.chat.completions.create(
+        model=settings.groq.model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=200,
+    )
+    text = completion.choices[0].message.content
+    return _parse_gemini_response(text, symbol, source="yahoo_rss", headlines=headlines)
 
 
 def _parse_gemini_response(
@@ -154,9 +218,14 @@ def _parse_gemini_response(
     confidence = int(parsed.get("confidence", 50))
     reason     = parsed.get("reason", "")
 
+    # Validate risk_level with whitelist; default to "LOW" on unknown values
+    raw_risk = str(parsed.get("risk_level", "LOW")).upper()
+    risk_level = raw_risk if raw_risk in ("HIGH", "MEDIUM", "LOW") else "LOW"
+
     params = {
         "sentiment": sentiment,
         "confidence": confidence,
+        "risk_level": risk_level,
         "source": source,
         "headlines_count": len(headlines) if headlines else 0,
     }
@@ -174,6 +243,10 @@ def _rss_symbol(symbol: str) -> str:
     mapping = {
         "EURUSD": "EURUSD=X",
         "GBPUSD": "GBPUSD=X",
+        "USDJPY": "JPY=X",
+        "AUDUSD": "AUDUSD=X",
+        "USDCAD": "CAD=X",
+        "USDCHF": "CHF=X",
     }
     return mapping.get(symbol, symbol)
 

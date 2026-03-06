@@ -67,6 +67,7 @@ class SignalLog(Base):
     regime = Column(String(30), nullable=True)
     position_tier = Column(String(20), nullable=True)
     raw_votes = Column(JSON, nullable=True)
+    macro_risk_level = Column(String(10), nullable=True)
 
 
 class StrategyRegistry(Base):

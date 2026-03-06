@@ -139,6 +139,43 @@ class TelegramNotifier:
             lines.append(f"Forex  ({len(forex)}): {', '.join(forex)}")
         self.send("\n".join(lines))
 
+    def notify_pdt_warning(self, used: int, limit: int) -> None:
+        remaining = limit - used
+        msg = (
+            f"⚠️ PDT ALERT: {used}/{limit} day trades used this week.\n"
+            f"{'No further stock day trades this week — swing mode only.' if remaining == 0 else f'{remaining} day trade(s) remaining. Next stock trade must be swing if this is the last.'}"
+        )
+        self.send(msg)
+
+    def notify_event_guard(self, symbol: str, reason: str) -> None:
+        msg = (
+            f"🚫 BLACKOUT: {symbol}\n"
+            f"{reason}\n"
+            f"No new entries until blackout lifts."
+        )
+        self.send(msg)
+
+    def notify_scan_result(self, results: list[dict]) -> None:
+        """
+        results: list of dicts with keys: symbol, direction, score
+        Only shows top signals (score >= 55).
+        """
+        tradeable = [r for r in results if r.get("score", 0) >= 55]
+        if not tradeable:
+            return
+        lines = ["📡 SCAN RESULT"]
+        for r in sorted(tradeable, key=lambda x: x["score"], reverse=True)[:5]:
+            arrow = "▲" if r.get("direction") == "long" else "▼"
+            lines.append(f"  {r['symbol']:<8} {arrow} {r['score']:.0f}%")
+        self.send("\n".join(lines))
+
+    def notify_optimizer_ready(self, approved: int, rejected: int) -> None:
+        msg = (
+            f"🔬 OPT READY: {approved} change(s) approved, {rejected} rejected.\n"
+            f"Open dashboard → Optimizer tab to review and apply."
+        )
+        self.send(msg)
+
     def notify_daily_summary(
         self,
         open_positions: int,

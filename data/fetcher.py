@@ -61,6 +61,36 @@ _CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
 _CACHE_TTL = 900  # 15 minutes in seconds
 
 
+_RETRY_DELAYS = (10, 30, 60)  # seconds between retries on rate-limit
+
+
+def _fetch_with_retry(yf_sym: str, interval: str, period: str) -> pd.DataFrame:
+    """
+    Fetch OHLCV via yf.download() with exponential backoff on rate-limit errors.
+    yf.download() is less aggressively rate-limited than Ticker.history().
+    """
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
+        try:
+            raw = yf.download(
+                yf_sym,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+                multi_level_index=False,
+            )
+            return raw
+        except Exception as exc:
+            if "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower():
+                if delay is None:
+                    raise
+                print(f"    [rate limit] retry {attempt}/{len(_RETRY_DELAYS)} in {delay}s…")
+                time.sleep(delay)
+            else:
+                raise
+    return pd.DataFrame()  # unreachable
+
+
 def _yf_symbol(symbol: str) -> str:
     return _SYMBOL_MAP.get(symbol.upper(), symbol.upper())
 
@@ -101,8 +131,7 @@ def fetch_candles(
     interval, default_period = _TF_CONFIG[timeframe]
     dl_period = period or default_period
 
-    ticker = yf.Ticker(yf_sym)
-    raw = ticker.history(interval=interval, period=dl_period, auto_adjust=True)
+    raw = _fetch_with_retry(yf_sym, interval=interval, period=dl_period)
 
     if raw.empty:
         raise RuntimeError(

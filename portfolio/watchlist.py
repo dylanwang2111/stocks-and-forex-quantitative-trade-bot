@@ -4,7 +4,10 @@ Instrument universe with per-instrument metadata.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
+
+_UNIVERSE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -208,24 +211,32 @@ def set_active_universe(instruments: list["Instrument"]) -> None:
     Updates UNIVERSE, UNIVERSE_BY_SYMBOL, and CORRELATION_BLACKLIST in-place
     so all existing module references remain valid.
     Called by PortfolioAgent.select() after scoring candidates.
+    Thread-safe: acquires _UNIVERSE_LOCK.
     """
     global CORRELATION_BLACKLIST
-    UNIVERSE.clear()
-    UNIVERSE.extend(instruments)
+    with _UNIVERSE_LOCK:
+        UNIVERSE.clear()
+        UNIVERSE.extend(instruments)
 
-    UNIVERSE_BY_SYMBOL.clear()
-    UNIVERSE_BY_SYMBOL.update({i.symbol: i for i in instruments})
+        UNIVERSE_BY_SYMBOL.clear()
+        UNIVERSE_BY_SYMBOL.update({i.symbol: i for i in instruments})
 
-    # Rebuild correlation blacklist from correlated_with fields
-    seen: set[frozenset] = set()
-    new_blacklist: list[frozenset] = []
-    for inst in instruments:
-        for corr in inst.correlated_with:
-            pair = frozenset({inst.symbol, corr})
-            if pair not in seen:
-                seen.add(pair)
-                new_blacklist.append(pair)
-    CORRELATION_BLACKLIST = new_blacklist
+        # Rebuild correlation blacklist from correlated_with fields
+        seen: set[frozenset] = set()
+        new_blacklist: list[frozenset] = []
+        for inst in instruments:
+            for corr in inst.correlated_with:
+                pair = frozenset({inst.symbol, corr})
+                if pair not in seen:
+                    seen.add(pair)
+                    new_blacklist.append(pair)
+        CORRELATION_BLACKLIST = new_blacklist
+
+
+def get_universe_snapshot() -> list["Instrument"]:
+    """Return a thread-safe copy of the current active UNIVERSE."""
+    with _UNIVERSE_LOCK:
+        return list(UNIVERSE)
 
 
 def get_instrument(symbol: str) -> Instrument:

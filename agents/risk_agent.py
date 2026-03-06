@@ -120,6 +120,16 @@ class RiskAgent:
         # ── Step 3: target position in USD ────────────────────────────────
         position_size_usd = max_position_usd * size_fraction
 
+        # ── Step 3b: apply macro risk multiplier ──────────────────────────
+        macro_mult = getattr(confidence_result, "macro_multiplier", 1.0)
+        macro_mult = max(0.0, min(macro_mult, 1.0))  # clamp to [0, 1]
+        position_size_usd *= macro_mult
+        if macro_mult < 1.0:
+            logger.info(
+                "RiskAgent: %s macro reduction %.0f%% (multiplier=%.2f)",
+                symbol, macro_mult * 100, macro_mult,
+            )
+
         # ── Step 4: clamp to available cash ───────────────────────────────
         if self._state is not None:
             available = self._state.available_cash()

@@ -8,11 +8,13 @@ Usage:
     python main.py --mode live        # live trading (real orders)
     python main.py --mode validate    # run backtests
     python main.py --mode optimize    # run optimization pipeline
+    python main.py --mode dashboard   # launch Streamlit monitoring dashboard
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import subprocess
 import sys
 
 from config.settings import settings
@@ -118,6 +120,23 @@ def run_validate(args) -> None:
         raise
 
 
+def run_dashboard(args) -> None:
+    """Launch the Streamlit monitoring dashboard."""
+    import os
+    dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.py")
+    print("  Launching Streamlit dashboard...")
+    print(f"  File: {dashboard_path}")
+    print("  Open http://localhost:8501 in your browser.")
+    print("  Press Ctrl+C to stop.\n")
+    try:
+        subprocess.run(["streamlit", "run", dashboard_path], check=True)
+    except FileNotFoundError:
+        print("ERROR: 'streamlit' not found. Install it with: pip install streamlit")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n  Dashboard stopped.")
+
+
 def run_optimize(args) -> None:
     """Run the optimization pipeline."""
     _print_banner("optimize")
@@ -140,15 +159,16 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Modes:
-  paper     Paper trading with simulated orders (default)
-  live      Live trading with real orders (requires broker API keys)
-  validate  Run backtests against historical data
-  optimize  Run the Gemini-powered optimization pipeline
+  paper      Paper trading with simulated orders (default)
+  live       Live trading with real orders (requires broker API keys)
+  validate   Run backtests against historical data
+  optimize   Run the Gemini-powered optimization pipeline
+  dashboard  Launch the Streamlit monitoring dashboard (http://localhost:8501)
         """,
     )
     parser.add_argument(
         "--mode",
-        choices=["paper", "live", "validate", "optimize"],
+        choices=["paper", "live", "validate", "optimize", "dashboard"],
         default="paper",
         help="Trading mode (default: paper)",
     )
@@ -168,10 +188,11 @@ Modes:
     _setup_logging(args.log_level)
 
     mode_handlers = {
-        "paper":    run_paper,
-        "live":     run_live,
-        "validate": run_validate,
-        "optimize": run_optimize,
+        "paper":     run_paper,
+        "live":      run_live,
+        "validate":  run_validate,
+        "optimize":  run_optimize,
+        "dashboard": run_dashboard,
     }
     mode_handlers[args.mode](args)
 

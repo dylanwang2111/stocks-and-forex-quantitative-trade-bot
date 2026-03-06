@@ -180,11 +180,19 @@ class OptimizationPipeline:
                     validation.rejection_reason,
                 )
 
+        rejected_count = len(valid_proposals) - accepted_count
         logger.info(
             "OptimizationPipeline: complete. %d/%d proposals accepted.",
             accepted_count,
             len(valid_proposals),
         )
+
+        # Notify Telegram that the cycle is done
+        try:
+            from notifications.telegram import TelegramNotifier
+            TelegramNotifier().notify_optimizer_ready(accepted_count, rejected_count)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Private helpers
