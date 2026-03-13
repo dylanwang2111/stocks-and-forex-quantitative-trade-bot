@@ -585,6 +585,8 @@ class Orchestrator:
                 unrealized_pnl=round(unrealized_pnl, 2),
                 total_equity=equity,
                 trading_mode=self._trading_mode,
+                deployed=round(self._state.deployed_capital(), 2),
+                available_cash=round(self._state.available_cash(), 2),
             )
         except Exception:
             logger.exception("save_snapshot: failed to send Telegram summary")

@@ -183,6 +183,8 @@ class TelegramNotifier:
         total_equity: float,
         trading_mode: str,
         unrealized_pnl: float = 0.0,
+        deployed: float = 0.0,
+        available_cash: float = 0.0,
     ) -> None:
         total_pnl = daily_pnl + unrealized_pnl
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
@@ -192,6 +194,8 @@ class TelegramNotifier:
             f"{pnl_emoji} HOURLY SUMMARY  [{trading_mode.upper()}]\n"
             f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
             f"Open positions: {open_positions}\n"
+            f"Deployed:       ${deployed:.2f}\n"
+            f"Available cash: ${available_cash:.2f}\n"
             f"Realized P&L:   {_fmt(daily_pnl)}\n"
             f"Unrealized P&L: {_fmt(unrealized_pnl)}\n"
             f"Total P&L:      {_fmt(total_pnl)}\n"
