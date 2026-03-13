@@ -59,7 +59,7 @@ class GroqConfig:
 @dataclass
 class GeminiConfig:
     api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    model: str = "gemini-2.0-flash-exp"
+    model: str = "gemini-2.5-flash"
 
     @property
     def enabled(self) -> bool:
@@ -93,6 +93,14 @@ class BotConfig:
     total_capital: float = field(
         default_factory=lambda: float(os.getenv("TOTAL_CAPITAL", "500"))
     )
+    # Per-broker capital: set these to the actual balance in each account.
+    # If not set (0), falls back to total_capital as a single unified pool.
+    ibkr_capital: float = field(
+        default_factory=lambda: float(os.getenv("IBKR_CAPITAL", "0"))
+    )
+    oanda_capital: float = field(
+        default_factory=lambda: float(os.getenv("OANDA_CAPITAL", "0"))
+    )
     risk_per_trade: float = field(
         default_factory=lambda: float(os.getenv("RISK_PER_TRADE", "0.01"))
     )
@@ -110,6 +118,18 @@ class BotConfig:
     @property
     def deployable_capital(self) -> float:
         return self.total_capital - self.cash_reserve
+
+    def broker_capital(self, broker: str) -> float:
+        """Capital available for a specific broker.
+
+        Uses per-broker config if set; falls back to total_capital
+        so existing single-account setups keep working unchanged.
+        """
+        if broker == "ibkr" and self.ibkr_capital > 0:
+            return self.ibkr_capital
+        if broker == "oanda" and self.oanda_capital > 0:
+            return self.oanda_capital
+        return self.total_capital
 
 
 @dataclass

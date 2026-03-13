@@ -54,3 +54,9 @@ docker exec -it trade-bot python3 main.py --mode validate   # run backtest
 
 Trade data is stored in a Docker volume `trade_data` mounted at `/data/trade_bot.db`.
 Back it up with: `docker cp trade-bot:/data/trade_bot.db ./backup.db`
+
+```bash
+mkdir -p logs
+nohup python main.py --mode paper --log-level INFO > logs/paper_$(date +%Y%m%d).log 2>&1 &
+echo "Bot PID: $!"
+```

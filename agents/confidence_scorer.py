@@ -9,6 +9,7 @@ Scoring system:
   - Regime multipliers applied per-category BEFORE summing
   - Score mapped to 0–100 range
   - Min 10-point lead gap between bull/bear required for directional trade
+  - SMALL tier starts at 55 to match backtest entry threshold
 """
 from __future__ import annotations
 
@@ -20,12 +21,12 @@ from regime.detector import RegimeContext
 
 
 class PositionTier(Enum):
-    NO_TRADE = "NO_TRADE"    # score < 55 — strict gate
-    WATCH    = "WATCH"       # 55–64  — monitor only, no entry
-    SMALL    = "SMALL"       # 65–74  — 25% of max position
-    MEDIUM   = "MEDIUM"      # 75–84  — 50% of max position
-    LARGE    = "LARGE"       # 85–94  — 75% of max position
-    FULL     = "FULL"        # ≥ 95   — 100% of max position
+    NO_TRADE = "NO_TRADE"    # score < 45 — no signal
+    WATCH    = "WATCH"       # 45–54  — monitor only, no entry
+    SMALL    = "SMALL"       # 55–69  — 25% of max position
+    MEDIUM   = "MEDIUM"      # 70–79  — 50% of max position
+    LARGE    = "LARGE"       # 80–89  — 75% of max position
+    FULL     = "FULL"        # ≥ 90   — 100% of max position
 
     def size_fraction(self) -> float:
         """Fraction of maximum position size to deploy."""
@@ -80,13 +81,13 @@ class ConfidenceScorer:
     # Minimum lead gap between bull and bear (in 0–100 points)
     MIN_LEAD_GAP = 10.0
 
-    # Confidence thresholds
+    # Confidence thresholds — calibrated to match backtest entry at 55
     THRESHOLDS = [
-        (95, PositionTier.FULL),
-        (85, PositionTier.LARGE),
-        (75, PositionTier.MEDIUM),
-        (65, PositionTier.SMALL),
-        (55, PositionTier.WATCH),
+        (90, PositionTier.FULL),
+        (80, PositionTier.LARGE),
+        (70, PositionTier.MEDIUM),
+        (55, PositionTier.SMALL),
+        (45, PositionTier.WATCH),
     ]
 
     def score(

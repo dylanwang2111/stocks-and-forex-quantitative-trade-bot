@@ -121,29 +121,25 @@ def _fetch_yf_rss(symbol: str) -> list[str]:
 
 def _macro_only_gemini(symbol: str, settings: Any) -> SignalResult:
     """Ask Gemini for macro context when no headlines are available."""
-    import google.generativeai as genai
+    from google import genai
 
-    genai.configure(api_key=settings.gemini.api_key)
-    model = genai.GenerativeModel(settings.gemini.model)
+    client = genai.Client(api_key=settings.gemini.api_key)
     prompt = (
         f"In one sentence, what is the current macro market sentiment for {symbol}? "
         f'Respond with JSON only: {{"sentiment": "BULLISH"|"BEARISH"|"NEUTRAL", '
         f'"confidence": 0-100, "risk_level": "HIGH"|"MEDIUM"|"LOW", "reason": "..."}}'
     )
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(model=settings.gemini.model, contents=prompt)
     return _parse_gemini_response(response.text, symbol, source="macro_only")
 
 
 def _analyse_with_gemini(symbol: str, headlines: list[str], settings: Any) -> SignalResult:
-    import google.generativeai as genai
+    from google import genai
 
-    genai.configure(api_key=settings.gemini.api_key)
-    model = genai.GenerativeModel(settings.gemini.model)
-
+    client = genai.Client(api_key=settings.gemini.api_key)
     headline_text = "\n".join(f"- {h}" for h in headlines)
     prompt = _GEMINI_PROMPT.format(symbol=symbol, headlines=headline_text)
-
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(model=settings.gemini.model, contents=prompt)
     return _parse_gemini_response(response.text, symbol, source="yahoo_rss", headlines=headlines)
 
 

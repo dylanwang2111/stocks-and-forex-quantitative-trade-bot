@@ -14,7 +14,7 @@ Algorithm (Half-Kelly / confidence-tier scaling):
   6. Recompute position_usd = quantity * current_price
   7. Stop / TP from direction + entry price
   8. risk_dollars   = |entry - stop| * quantity
-  9. Cap risk at total_capital × risk_per_trade; scale quantity down if breached
+  9. Cap risk at broker_capital × risk_per_trade; scale quantity down if breached
 """
 from __future__ import annotations
 
@@ -28,6 +28,11 @@ from portfolio.watchlist import get_instrument
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# ATR-based stop/TP multipliers (matching backtest parameters)
+_ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 1.5}
+_ATR_TP_MULT: dict[str, float] = {"stock": 4.0, "forex": 3.0}
+_TARGET_ATR_PCT = 0.02   # target 2% ATR exposure per position (for vol scaling)
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +71,16 @@ class RiskAgent:
         confidence_result: ConfidenceResult,
         current_price: float,
         symbol: str,
+        atr: float | None = None,
     ) -> RiskParams | None:
         """
         Compute position sizing.
+
+        Parameters
+        ----------
+        atr:
+            ATR(14) value from 1h data. When provided, stops and TP are placed
+            at ATR multiples and position size is scaled by volatility.
 
         Returns None if:
         - tier is NO_TRADE or WATCH
@@ -77,7 +89,7 @@ class RiskAgent:
         - any unexpected error (logged as WARNING)
         """
         try:
-            return self._compute(confidence_result, current_price, symbol)
+            return self._compute(confidence_result, current_price, symbol, atr=atr)
         except Exception as exc:
             logger.warning(
                 "RiskAgent.compute: unexpected error for %s — %s", symbol, exc, exc_info=True
@@ -93,6 +105,7 @@ class RiskAgent:
         confidence_result: ConfidenceResult,
         current_price: float,
         symbol: str,
+        atr: float | None = None,
     ) -> RiskParams | None:
 
         tier = confidence_result.position_tier
@@ -114,8 +127,9 @@ class RiskAgent:
         # ── Step 1: size_fraction from tier ───────────────────────────────
         size_fraction = tier.size_fraction()
 
-        # ── Step 2: max position = 2/3 of total capital ───────────────────
-        max_position_usd = settings.bot.total_capital * 0.667   # $333.50 on $500
+        # ── Step 2: max position = 2/3 of this broker's capital ──────────
+        broker_cap = settings.bot.broker_capital(instrument.broker)
+        max_position_usd = broker_cap * 0.667
 
         # ── Step 3: target position in USD ────────────────────────────────
         position_size_usd = max_position_usd * size_fraction
@@ -130,9 +144,21 @@ class RiskAgent:
                 symbol, macro_mult * 100, macro_mult,
             )
 
-        # ── Step 4: clamp to available cash ───────────────────────────────
+        # Step 3c: volatility-adjusted sizing — scale down high-vol instruments
+        if atr is not None and atr > 0 and current_price > 0:
+            atr_pct = atr / current_price
+            vol_scale = min(1.0, _TARGET_ATR_PCT / atr_pct)
+            vol_scale = max(0.35, vol_scale)  # floor at 35% of slot
+            position_size_usd *= vol_scale
+            if vol_scale < 1.0:
+                logger.info(
+                    "RiskAgent: %s vol-scaled %.0f%% (atr_pct=%.2f%%)",
+                    symbol, vol_scale * 100, atr_pct * 100,
+                )
+
+        # ── Step 4: clamp to available cash in this broker's pool ────────
         if self._state is not None:
-            available = self._state.available_cash()
+            available = self._state.available_cash(broker=instrument.broker)
             if available < instrument.min_position_usd:
                 logger.debug(
                     "RiskAgent: %s insufficient cash (available=%.2f < min=%.2f)",
@@ -159,18 +185,25 @@ class RiskAgent:
         # ── Step 6: recompute position_size_usd after rounding ────────────
         position_size_usd = quantity * current_price
 
-        # ── Step 7: stop and take-profit prices ───────────────────────────
+        # Step 7: stop and take-profit prices (ATR-based when available, fixed % fallback)
         direction = confidence_result.direction
         entry_price = current_price
+        asset_type = instrument.asset_type
+
+        if atr is not None and atr > 0:
+            sl_dist = atr * _ATR_SL_MULT.get(asset_type, 2.0)
+            tp_dist = atr * _ATR_TP_MULT.get(asset_type, 4.0)
+        else:
+            sl_dist = entry_price * self.STOP_PCT
+            tp_dist = entry_price * self.TP_PCT
 
         if direction == "long":
-            stop_price        = entry_price * (1.0 - self.STOP_PCT)
-            take_profit_price = entry_price * (1.0 + self.TP_PCT)
+            stop_price        = entry_price - sl_dist
+            take_profit_price = entry_price + tp_dist
         elif direction == "short":
-            stop_price        = entry_price * (1.0 + self.STOP_PCT)
-            take_profit_price = entry_price * (1.0 - self.TP_PCT)
+            stop_price        = entry_price + sl_dist
+            take_profit_price = entry_price - tp_dist
         else:
-            # Should not reach here since neutral → NO_TRADE, but be safe
             logger.warning(
                 "RiskAgent: %s direction='%s' is not long/short after tier check",
                 symbol, direction,
@@ -181,8 +214,8 @@ class RiskAgent:
         stop_distance = abs(entry_price - stop_price)
         risk_dollars  = stop_distance * quantity
 
-        # ── Step 9: cap risk at MAX_RISK_USD ──────────────────────────────
-        max_risk_usd = settings.bot.total_capital * settings.bot.risk_per_trade
+        # ── Step 9: cap risk at MAX_RISK_USD (per-broker pool) ────────────
+        max_risk_usd = broker_cap * settings.bot.risk_per_trade
         if risk_dollars > max_risk_usd:
             capped_qty = max_risk_usd / stop_distance
             # Floor (not round) so risk_dollars never exceeds MAX_RISK_USD after rounding
@@ -291,15 +324,13 @@ def test_risk_agent() -> None:
     agent = RiskAgent(state_manager=None)
 
     # ── Test 1: SMALL tier — EURUSD at 1.08 ──────────────────────────────
-    capital   = settings.bot.total_capital
-    max_pos   = capital * 0.667
-    # max_position = capital * 0.667
-    # position_usd = max_pos * 0.25
-    # raw_qty      = position_usd / 1.08 → rounded to int (forex)
+    # EURUSD is forex → broker="oanda" → uses broker_capital("oanda")
+    oanda_cap = settings.bot.broker_capital("oanda")
+    max_pos_oanda = oanda_cap * 0.667
     cr_small = make_cr(PositionTier.SMALL, "long")
     rp = agent.compute(cr_small, current_price=1.08, symbol="EURUSD")
     assert rp is not None, "SMALL tier should produce RiskParams"
-    expected_qty  = round(max_pos * 0.25 / 1.08)
+    expected_qty  = round(max_pos_oanda * 0.25 / 1.08)
     expected_size = expected_qty * 1.08
     assert rp.quantity == float(expected_qty), f"Expected qty={expected_qty}, got {rp.quantity}"
     assert rp.position_tier == "SMALL"
@@ -310,17 +341,15 @@ def test_risk_agent() -> None:
     print(f"Test 1 PASS — EURUSD SMALL: qty={rp.quantity}, size_usd={rp.position_size_usd:.2f}")
 
     # ── Test 2: FULL tier — SPY at $500 ──────────────────────────────────
-    # max_position = capital * 0.667
-    # position_usd = max_pos * 1.00
-    # raw_qty      = max_pos / 500 → rounded 4dp
-    # stop_distance = 500 * 0.015 = 7.50
-    # If risk > max_risk_usd → cap triggers: capped_qty = max_risk_usd / stop_distance → floor 4dp
+    # SPY is stock → broker="ibkr" → uses broker_capital("ibkr")
+    ibkr_cap = settings.bot.broker_capital("ibkr")
+    max_pos_ibkr = ibkr_cap * 0.667
     cr_full = make_cr(PositionTier.FULL, "long")
     rp2 = agent.compute(cr_full, current_price=500.0, symbol="SPY")
     assert rp2 is not None, "FULL tier should produce RiskParams"
-    expected_raw_qty  = max_pos / 500.0
+    expected_raw_qty  = max_pos_ibkr / 500.0
     stop_distance_spy = 500.0 * 0.015
-    max_risk_usd      = capital * settings.bot.risk_per_trade
+    max_risk_usd      = ibkr_cap * settings.bot.risk_per_trade
     if expected_raw_qty * stop_distance_spy > max_risk_usd:
         capped = max_risk_usd / stop_distance_spy
         expected_qty2 = math.floor(capped * 10000) / 10000
@@ -331,15 +360,16 @@ def test_risk_agent() -> None:
     assert rp2.size_fraction == 1.00
     print(f"Test 2 PASS — SPY FULL: qty={rp2.quantity}, size_usd={rp2.position_size_usd:.2f} (risk-capped)")
 
-    # ── Test 3: risk_dollars <= total_capital * risk_per_trade ───────────
+    # ── Test 3: risk_dollars <= broker_capital * risk_per_trade ──────────
     # For EURUSD SMALL: stop_distance = 1.08 * 0.015 = 0.0162
     # risk_dollars should be well under max_risk_usd, no cap needed
-    _max_risk = settings.bot.total_capital * settings.bot.risk_per_trade
+    _max_risk = oanda_cap * settings.bot.risk_per_trade
     assert rp.risk_dollars <= _max_risk, (
         f"risk_dollars={rp.risk_dollars} exceeds max_risk_usd={_max_risk}"
     )
-    # Force a scenario where capping IS triggered: FULL SPY
-    assert rp2.risk_dollars <= _max_risk, (
+    # Force a scenario where capping IS triggered: FULL SPY (capped against ibkr pool)
+    _max_risk_ibkr = ibkr_cap * settings.bot.risk_per_trade
+    assert rp2.risk_dollars <= _max_risk_ibkr, (
         f"risk_dollars={rp2.risk_dollars} exceeds max_risk_usd after cap"
     )
     print(f"Test 3 PASS — risk_dollars capped: EURUSD={rp.risk_dollars:.4f}, SPY={rp2.risk_dollars:.4f}")

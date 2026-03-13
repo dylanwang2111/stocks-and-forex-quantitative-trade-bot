@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         help="Run walk-forward validation (2022, 2023, 2024) instead of single period.",
     )
     parser.add_argument(
+        "--portfolio",
+        action="store_true",
+        help="Run portfolio-level backtest (all instruments simultaneously, max 2 positions).",
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=55.0,
@@ -44,7 +49,30 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Days to hold a position (default: 3)",
     )
+    parser.add_argument(
+        "--start",
+        type=str,
+        default="2020-01-01",
+        help="Backtest start date YYYY-MM-DD (default: 2020-01-01)",
+    )
+    parser.add_argument(
+        "--end",
+        type=str,
+        default="2025-03-01",
+        help="Backtest end date YYYY-MM-DD (default: 2025-03-01)",
+    )
     return parser.parse_args()
+
+
+def _cache_path(symbols: list[str], start: str, end: str) -> "Path":
+    """Return a deterministic cache file path for a given query."""
+    from pathlib import Path
+    import hashlib
+    key = f"{'_'.join(sorted(symbols))}_{start}_{end}"
+    h = hashlib.md5(key.encode()).hexdigest()[:8]
+    cache_dir = Path("tasks/data_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"daily_{h}.pkl"
 
 
 def bulk_fetch_daily(
@@ -54,12 +82,25 @@ def bulk_fetch_daily(
 ) -> dict[str, "pd.DataFrame"]:
     """
     Download daily OHLCV for all symbols in a single yfinance API call.
+    Results are cached to disk so repeated runs don't re-hit yfinance rate limits.
     Returns {symbol: DataFrame} mapping. Symbols that fail are omitted.
     Falls back to an empty dict on total failure.
     """
+    import pickle
+    from pathlib import Path
     import pandas as pd
     import yfinance as yf
     from data.fetcher import _SYMBOL_MAP
+
+    cache_file = _cache_path(symbols, start, end)
+    if cache_file.exists():
+        try:
+            with open(cache_file, "rb") as f:
+                cached = pickle.load(f)
+            print(f"  Loaded cached data ({len(cached)} symbols, {cache_file.name})", flush=True)
+            return cached
+        except Exception:
+            cache_file.unlink(missing_ok=True)
 
     yf_symbols = [_SYMBOL_MAP.get(s.upper(), s.upper()) for s in symbols]
     sym_to_yf   = {s.upper(): _SYMBOL_MAP.get(s.upper(), s.upper()) for s in symbols}
@@ -107,6 +148,14 @@ def bulk_fetch_daily(
         except Exception as exc:
             print(f"  Warning: could not slice {yf_sym} ({orig_sym}): {exc}")
 
+    if result:
+        try:
+            with open(cache_file, "wb") as f:
+                pickle.dump(result, f)
+            print(f"  Cached to {cache_file.name}", flush=True)
+        except Exception:
+            pass  # cache write failure is non-fatal
+
     return result
 
 
@@ -117,7 +166,7 @@ def print_summary_table(results: list) -> None:
         return
 
     print("\n" + "=" * 80)
-    print("  BACKTEST SUMMARY — Full Period (2022–2024)")
+    print("  BACKTEST SUMMARY — Individual Instruments")
     print("=" * 80)
     header = (
         f"{'Symbol':<10} {'Sharpe':>8} {'WinRate':>9} {'MaxDD':>8} "
@@ -146,7 +195,7 @@ def print_summary_table(results: list) -> None:
 
 
 def run_single_backtest(symbol: str, args: argparse.Namespace) -> None:
-    """Run and print a single-period (3-year) backtest."""
+    """Run and print a single-period backtest."""
     from backtesting.backtest_runner import BacktestRunner
 
     runner = BacktestRunner(
@@ -154,10 +203,12 @@ def run_single_backtest(symbol: str, args: argparse.Namespace) -> None:
         holding_days=args.holding_days,
     )
 
+    start = getattr(args, "start", "2020-01-01")
+    end   = getattr(args, "end",   "2025-03-01")
     print(f"  Fetching data for {symbol}...")
     t0 = time.time()
     try:
-        result = runner.run(symbol, start="2022-01-01", end="2024-12-31")
+        result = runner.run(symbol, start=start, end=end)
         elapsed = time.time() - t0
         print(f"  Done in {elapsed:.1f}s")
         print_summary_table([result])
@@ -179,19 +230,89 @@ def run_walkforward(symbol: str, args: argparse.Namespace) -> None:
     report.print_table()
 
 
+def run_portfolio_backtest(args: argparse.Namespace, walkforward: bool = False) -> None:
+    """Run portfolio-level backtest (all instruments simultaneously)."""
+    from backtesting.portfolio_backtest import PortfolioBacktestRunner
+    from portfolio.watchlist import active_symbols, UNIVERSE_BY_SYMBOL
+
+    all_syms = [args.symbol.upper()] if args.symbol else active_symbols()
+    # Daily bar signals are not representative for forex (live bot uses 15m/1h for forex).
+    # Exclude forex from the portfolio daily-bar backtest to avoid misleading results.
+    symbols = [s for s in all_syms
+               if not (UNIVERSE_BY_SYMBOL.get(s) and UNIVERSE_BY_SYMBOL[s].asset_type == "forex")]
+    if not symbols:
+        symbols = all_syms  # fallback: keep all if filter removed everything
+
+    runner = PortfolioBacktestRunner(
+        confidence_threshold=args.threshold,
+        holding_days=args.holding_days,
+    )
+
+    bt_start = getattr(args, "start", "2020-01-01")
+    bt_end   = getattr(args, "end",   "2025-03-01")
+
+    # Fetch with a 2-year lookback before start for EMA200 warmup (200 trading days ~ 10 months,
+    # but we use 2 years to be safe and handle any gaps).
+    import datetime
+    fetch_start_dt = datetime.date.fromisoformat(bt_start) - datetime.timedelta(days=730)
+    FETCH_START = fetch_start_dt.strftime("%Y-%m-%d")
+    FULL_END    = bt_end
+
+    print(f"\n  Bulk-fetching {len(symbols)} symbols for portfolio backtest…")
+    print(f"  Period: {bt_start} → {bt_end}  (warmup from {FETCH_START})")
+    prefetched = bulk_fetch_daily(symbols, FETCH_START, FULL_END)
+
+    if walkforward:
+        # Split the requested range into annual periods
+        import datetime as dt
+        start_yr = int(bt_start[:4])
+        end_yr   = int(bt_end[:4])
+        periods = []
+        for yr in range(start_yr, end_yr + 1):
+            yr_start = f"{yr}-01-01"
+            yr_end   = f"{yr}-12-31"
+            # Don't exceed the requested end
+            if yr_end > bt_end:
+                yr_end = bt_end
+            label = f"{yr}"
+            periods.append((yr_start, yr_end, label))
+
+        print(f"\n  Portfolio walk-forward — {', '.join(symbols)}")
+        for start, end, label in periods:
+            result = runner.run(symbols, start=start, end=end, prefetched_dfs=prefetched)
+            print(f"\n  ── {label} ──")
+            result.print_table()
+    else:
+        result = runner.run(symbols, start=bt_start, end=FULL_END, prefetched_dfs=prefetched)
+        result.print_table()
+
+
 def main() -> None:
     args = parse_args()
 
     from portfolio.watchlist import active_symbols
     symbols = [args.symbol.upper()] if args.symbol else active_symbols()
 
+    start = getattr(args, "start", "2020-01-01")
+    end   = getattr(args, "end",   "2025-03-01")
+    mode = (
+        f"Portfolio walk-forward ({start[:4]}–{end[:4]})" if (args.portfolio and args.walkforward)
+        else f"Portfolio full period ({start} → {end})" if args.portfolio
+        else "Walk-forward (per-year periods)" if args.walkforward
+        else f"Full period ({start} → {end})"
+    )
+
     print("=" * 60)
     print(f"  Trade Bot — Backtest Validator")
     print(f"  Symbols    : {', '.join(symbols)}")
-    print(f"  Mode       : {'Walk-forward (3 periods)' if args.walkforward else 'Full period (2022–2024)'}")
+    print(f"  Mode       : {mode}")
     print(f"  Threshold  : {args.threshold}%")
     print(f"  Hold days  : {args.holding_days}")
     print("=" * 60)
+
+    if args.portfolio:
+        run_portfolio_backtest(args, walkforward=args.walkforward)
+        return
 
     if args.walkforward:
         for sym in symbols:
@@ -207,7 +328,7 @@ def main() -> None:
                 holding_days=args.holding_days,
             )
 
-            START, END = "2022-01-01", "2024-12-31"
+            START, END = start, end
             prefetched = bulk_fetch_daily(symbols, START, END)
 
             all_results = []
@@ -216,7 +337,7 @@ def main() -> None:
                 t0 = time.time()
                 try:
                     df = prefetched.get(sym)
-                    result = runner.run(sym, start=START, end=END, df=df)
+                    result = runner.run(sym, start=start, end=end, df=df)
                     elapsed = time.time() - t0
                     print(f"Sharpe={result.sharpe:.2f}, Trades={result.trade_count} ({elapsed:.1f}s)")
                     all_results.append(result)

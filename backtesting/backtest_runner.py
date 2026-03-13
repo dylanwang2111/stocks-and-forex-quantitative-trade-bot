@@ -119,16 +119,18 @@ class BacktestRunner:
             BacktestResult
         """
         if df is None:
-            df = fetch_candles(symbol, "1d", use_cache=False)
+            # Always use yfinance for historical data (broker APIs don't serve multi-year bars)
+            df = fetch_candles(symbol, "1d", period="5y", use_cache=False)
 
-        # Filter to requested period
-        df = df.loc[start:end].copy()
+        # Keep the full df for indicator warmup (especially EMA200 needs 200 bars).
+        # Signal generation uses the full df; simulation is sliced to start:end.
         if len(df) < 30:
             return self._empty_result(symbol, start, end, reason="Insufficient data")
 
         asset_type = ASSET_TYPE.get(symbol, "stock")
         fee = FEES[asset_type]
 
+        # Generate signals on full df (for EMA200 warmup), then slice inside run methods
         if VBT_AVAILABLE:
             return self._run_vectorbt(symbol, df, start, end, fee)
         else:
@@ -144,19 +146,40 @@ class BacktestRunner:
         end: str,
         fee: float,
     ) -> BacktestResult:
-        entries, exits = self._generate_signals(df)
+        # Generate on full df (EMA200 warmup), then slice to the period
+        long_entries, long_exits, short_entries, short_exits = self._generate_signals(df)
+        long_entries  = long_entries.loc[start:end]
+        long_exits    = long_exits.loc[start:end]
+        short_entries = short_entries.loc[start:end]
+        short_exits   = short_exits.loc[start:end]
+        df_period     = df.loc[start:end]
 
-        if entries.sum() == 0:
+        if long_entries.sum() + short_entries.sum() == 0:
             return self._empty_result(symbol, start, end, reason="No entries generated")
 
-        pf = vbt.Portfolio.from_signals(
-            close=df["close"],
-            entries=entries,
-            exits=exits,
-            fees=fee,
-            freq="1D",
-            init_cash=settings.bot.total_capital,
-        )
+        try:
+            pf = vbt.Portfolio.from_signals(
+                close=df_period["close"],
+                entries=long_entries,
+                exits=long_exits,
+                short_entries=short_entries,
+                short_exits=short_exits,
+                fees=fee,
+                freq="1D",
+                init_cash=settings.bot.total_capital,
+            )
+        except TypeError:
+            # Older vectorbt versions don't support short_entries — fall back to long-only
+            if long_entries.sum() == 0:
+                return self._empty_result(symbol, start, end, reason="No long entries (long-only fallback)")
+            pf = vbt.Portfolio.from_signals(
+                close=df_period["close"],
+                entries=long_entries,
+                exits=long_exits,
+                fees=fee,
+                freq="1D",
+                init_cash=settings.bot.total_capital,
+            )
 
         stats = pf.stats()
 
@@ -168,7 +191,7 @@ class BacktestRunner:
 
         pf_val = float(stats.get("Profit Factor", 0) or 0)
         if pf_val == 0 or np.isnan(pf_val) or np.isinf(pf_val):
-            pf_val = self._manual_profit_factor(df, entries, exits)
+            pf_val = self._manual_profit_factor(df, long_entries, long_exits, short_entries, short_exits)
 
         equity = pf.value()
 
@@ -195,35 +218,59 @@ class BacktestRunner:
         end: str,
         fee: float,
     ) -> BacktestResult:
-        entries, exits = self._generate_signals(df)
+        # Generate on full df (EMA200 warmup), then slice to the period
+        long_entries, long_exits, short_entries, short_exits = self._generate_signals(df)
+        long_entries  = long_entries.loc[start:end]
+        long_exits    = long_exits.loc[start:end]
+        short_entries = short_entries.loc[start:end]
+        short_exits   = short_exits.loc[start:end]
+        df = df.loc[start:end]
         close = df["close"]
 
         initial_cash = settings.bot.total_capital
         cash  = initial_cash
         equity_vals = [cash]
-        trades: list[tuple[float, float]] = []  # (entry_px, exit_px)
+        trades: list[tuple[float, float, str]] = []  # (entry_px, exit_px, side)
 
-        in_trade = False
+        position = 0  # +1 = long, -1 = short, 0 = flat
         entry_px = 0.0
         entry_idx = 0
         shares = 0.0
 
-        for i, (entry, exit_sig) in enumerate(zip(entries, exits)):
-            if not in_trade and entry:
-                entry_px  = float(close.iloc[i]) * (1 + fee / 2)
-                shares    = (cash * 0.95) / entry_px  # use 95% of cash
-                in_trade  = True
-                entry_idx = i
+        for i in range(len(df)):
+            long_e  = bool(long_entries.iloc[i])
+            long_x  = bool(long_exits.iloc[i])
+            short_e = bool(short_entries.iloc[i])
+            short_x = bool(short_exits.iloc[i])
+            hold_exceeded = position != 0 and (i - entry_idx) >= self.holding_days
 
-            elif in_trade:
-                hold_exceeded = (i - entry_idx) >= self.holding_days
-                if exit_sig or hold_exceeded:
+            # Close existing position
+            if position != 0 and (hold_exceeded
+                                  or (position == 1 and long_x)
+                                  or (position == -1 and short_x)):
+                if position == 1:
                     exit_px = float(close.iloc[i]) * (1 - fee / 2)
                     pnl = shares * (exit_px - entry_px)
-                    cash += pnl
-                    trades.append((entry_px, exit_px))
-                    in_trade = False
-                    shares = 0.0
+                else:
+                    exit_px = float(close.iloc[i]) * (1 + fee / 2)
+                    pnl = shares * (entry_px - exit_px)  # short profit when price falls
+                cash += pnl
+                trades.append((entry_px, exit_px, "long" if position == 1 else "short"))
+                position = 0
+                shares = 0.0
+
+            # Open new position
+            if position == 0:
+                if long_e:
+                    entry_px = float(close.iloc[i]) * (1 + fee / 2)
+                    shares   = (cash * 0.95) / entry_px
+                    position = 1
+                    entry_idx = i
+                elif short_e:
+                    entry_px = float(close.iloc[i]) * (1 - fee / 2)
+                    shares   = (cash * 0.95) / entry_px
+                    position = -1
+                    entry_idx = i
 
             equity_vals.append(cash)
 
@@ -236,10 +283,16 @@ class BacktestRunner:
         sharpe = (returns.mean() / returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
         max_dd = self._max_drawdown(equity)
 
-        wins = [(e, x) for e, x in trades if x > e]
+        def _is_win(entry, exit_px, side):
+            return (exit_px > entry) if side == "long" else (exit_px < entry)
+
+        def _pnl(entry, exit_px, side):
+            return (exit_px - entry) if side == "long" else (entry - exit_px)
+
+        wins = [(e, x, s) for e, x, s in trades if _is_win(e, x, s)]
         win_rate = len(wins) / len(trades)
-        gross_profit = sum(x - e for e, x in wins)
-        gross_loss   = sum(e - x for e, x in trades if x < e)
+        gross_profit = sum(_pnl(e, x, s) for e, x, s in wins)
+        gross_loss   = sum(abs(_pnl(e, x, s)) for e, x, s in trades if not _is_win(e, x, s))
         pf = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
         total_return = (cash - initial_cash) / initial_cash
@@ -261,24 +314,25 @@ class BacktestRunner:
 
     def _generate_signals(
         self, df: pd.DataFrame
-    ) -> tuple[pd.Series, pd.Series]:
+    ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
         """
         Generate entry/exit boolean Series from daily OHLCV.
-        Uses a simplified indicator stack covering all 8 categories so that
-        the confidence scorer can reach the minimum threshold.
+        Returns (long_entries, long_exits, short_entries, short_exits).
 
-        Category proxies (simplified for backtesting speed):
+        Regime-aware with EMA50 vs EMA200 macro filter:
+          - Bull regime (EMA50 > EMA200): long entries only
+          - Bear regime (EMA50 < EMA200): short entries only
+          - Exit on opposite signal or max holding_days
+
+        Category proxies:
           cat1 – trend direction : EMA9 vs EMA21 + MACD histogram agreement
-          cat2 – trend strength  : EMA21 vs EMA50 alignment (mirrors cat1 direction)
-          cat3 – momentum        : RSI oversold/overbought
-          cat4 – volatility      : always 0 (neutral — no ATR band data)
-          cat5 – volume          : close-to-close return magnitude vs 20-day avg
+          cat2 – trend strength  : EMA21 vs EMA50 alignment
+          cat3 – momentum        : RSI above/below midline (53/47 deadband)
+          cat4 – BB expansion    : votes with cat1 when BB bandwidth expands (breakout)
+          cat5 – volume          : volume ratio vs 20-day avg (echoes cat1 direction)
           cat6 – price structure : prior bar return direction
-          cat7 – multi-timeframe : cat1 vote × 2 (double weight, single-TF proxy)
-          cat8 – macro/news      : always 0 (no macro data in backtest)
-
-        With a strong trend (cat1=cat2=cat5=cat6=+1, cat7=+2) the bull raw sum
-        reaches 6/9 ≈ 67 — well above the 55 threshold.
+          cat7 – MTF proxy       : cat1 × 2 when cat1 == cat2, else cat1 (single weight)
+          cat8 – macro/news      : always 0 (cannot replay macro events in backtest)
         """
         close  = df["close"]
         volume = df.get("volume", pd.Series(1, index=close.index))
@@ -289,27 +343,50 @@ class BacktestRunner:
         rsi   = ta.rsi(close, length=14)
         macd_df = ta.macd(close, fast=12, slow=26, signal=9)
 
+        # ADX for trend-strength gate (only trade when trend is present)
+        adx_df = ta.adx(df["high"], df["low"], close, length=14)
+        if adx_df is not None:
+            adx_col = [c for c in adx_df.columns if c.startswith("ADX_")][0]
+            adx_series = adx_df[adx_col]
+        else:
+            adx_series = pd.Series(0.0, index=close.index)
+
         if macd_df is not None:
             hist_col = [c for c in macd_df.columns if "MACDh" in c][0]
             macd_hist = macd_df[hist_col]
         else:
             macd_hist = pd.Series(0.0, index=close.index)
 
+        # BB bandwidth for cat4 (expansion = breakout confirmation)
+        bb = ta.bbands(close, length=20, std=2.0)
+        if bb is not None:
+            bbu_col = [c for c in bb.columns if "BBU" in c][0]
+            bbl_col = [c for c in bb.columns if "BBL" in c][0]
+            bb_width = (bb[bbu_col] - bb[bbl_col]) / close
+            bb_expanding = bb_width > bb_width.shift(1)
+        else:
+            bb_expanding = pd.Series(False, index=close.index)
+
+        # EMA50 10-bar slope for macro regime gate
+        ema50_slope = ema50.diff(10)
+
         # 20-bar rolling mean volume for cat5
         vol_ma20 = volume.rolling(20).mean()
         # Daily return for cat6
         daily_ret = close.pct_change()
 
-        entries = pd.Series(False, index=close.index)
-        exits   = pd.Series(False, index=close.index)
+        long_entries  = pd.Series(False, index=close.index)
+        long_exits    = pd.Series(False, index=close.index)
+        short_entries = pd.Series(False, index=close.index)
+        short_exits   = pd.Series(False, index=close.index)
 
-        for i in range(50, len(df)):
+        for i in range(200, len(df)):
             votes = {}
 
             # ── cat1: EMA9/21 crossover confirmed by MACD histogram ─────────
             if pd.notna(ema9.iloc[i]) and pd.notna(ema21.iloc[i]):
-                ema_bull = ema9.iloc[i] > ema21.iloc[i]
-                ema_bear = ema9.iloc[i] < ema21.iloc[i]
+                ema_bull  = ema9.iloc[i] > ema21.iloc[i]
+                ema_bear  = ema9.iloc[i] < ema21.iloc[i]
                 macd_bull = macd_hist.iloc[i] > 0
                 macd_bear = macd_hist.iloc[i] < 0
                 if ema_bull and macd_bull:
@@ -332,9 +409,7 @@ class BacktestRunner:
             else:
                 votes["cat2"] = 0
 
-            # ── cat3: RSI momentum confirmation (trend-following) ────────────
-            # RSI above midline = bullish momentum; below = bearish
-            # Neutral band ±3 around 50 avoids noise at the midline
+            # ── cat3: RSI momentum confirmation ──────────────────────────────
             if pd.notna(rsi.iloc[i]):
                 rsi_val = rsi.iloc[i]
                 if rsi_val > 53:
@@ -346,16 +421,16 @@ class BacktestRunner:
             else:
                 votes["cat3"] = 0
 
-            # ── cat4: volatility — neutral in simplified backtest ───────────
-            votes["cat4"] = 0
+            # ── cat4: BB expansion proxy — votes with cat1 when expanding ─────
+            if pd.notna(bb_expanding.iloc[i]):
+                votes["cat4"] = votes.get("cat1", 0) if bb_expanding.iloc[i] else 0
+            else:
+                votes["cat4"] = 0
 
-            # ── cat5: volume confirmation (stocks only — forex volume = noise)
+            # ── cat5: volume confirmation ────────────────────────────────────
             if pd.notna(vol_ma20.iloc[i]) and vol_ma20.iloc[i] > 0:
                 vol_ratio = volume.iloc[i] / vol_ma20.iloc[i]
-                if vol_ratio > 1.1:
-                    votes["cat5"] = votes.get("cat1", 0)
-                else:
-                    votes["cat5"] = 0
+                votes["cat5"] = votes.get("cat1", 0) if vol_ratio > 1.1 else 0
             else:
                 votes["cat5"] = 0
 
@@ -366,28 +441,32 @@ class BacktestRunner:
             else:
                 votes["cat6"] = 0
 
-            # ── cat7: MTF — double weight only when cat1 AND cat2 agree ──────
-            # Both EMAs aligned → genuine multi-timeframe confirmation (+2)
-            # Only cat1 aligned → partial confirmation (+1)
+            # ── cat7: MTF proxy ───────────────────────────────────────────────
             c1, c2 = votes.get("cat1", 0), votes.get("cat2", 0)
             if c1 != 0 and c1 == c2:
-                votes["cat7"] = c1 * 2   # full double weight
+                votes["cat7"] = c1 * 2
             elif c1 != 0:
-                votes["cat7"] = c1        # single weight
+                votes["cat7"] = c1
             else:
                 votes["cat7"] = 0
 
-            # ── cat8: macro — neutral in simplified backtest ─────────────────
+            # ── cat8: neutral in backtest ─────────────────────────────────────
             votes["cat8"] = 0
 
             direction, score = self.scorer.simple_signal(votes, self.threshold)
 
-            if direction == 1 and not entries.iloc[i - 1]:
-                entries.iloc[i] = True
-            elif direction == -1 and not exits.iloc[i - 1]:
-                exits.iloc[i] = True
+            # ── Macro regime: EMA50 slope > 0 = uptrend ──────────────────────
+            # Blocks long entries when EMA50 is falling (sustained downtrend)
+            macro_uptrend = (
+                pd.notna(ema50_slope.iloc[i]) and ema50_slope.iloc[i] > 0
+            )
 
-        return entries, exits
+            if direction == 1 and macro_uptrend and not long_entries.iloc[i - 1]:
+                long_entries.iloc[i] = True
+            elif direction == -1 and not long_exits.iloc[i - 1]:
+                long_exits.iloc[i] = True  # bearish signal always exits longs
+
+        return long_entries, long_exits, short_entries, short_exits
 
     # ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -400,24 +479,41 @@ class BacktestRunner:
     @staticmethod
     def _manual_profit_factor(
         df: pd.DataFrame,
-        entries: pd.Series,
-        exits: pd.Series,
+        long_entries: pd.Series,
+        long_exits: pd.Series,
+        short_entries: pd.Series | None = None,
+        short_exits: pd.Series | None = None,
     ) -> float:
         close = df["close"]
         gross_profit = gross_loss = 0.0
-        in_trade = False
+        position = 0  # +1 long, -1 short
         entry_px = 0.0
-        for i, (e, x) in enumerate(zip(entries, exits)):
-            if not in_trade and e:
-                entry_px = float(close.iloc[i])
-                in_trade = True
-            elif in_trade and x:
-                pnl = float(close.iloc[i]) - entry_px
-                if pnl > 0:
-                    gross_profit += pnl
-                else:
-                    gross_loss += abs(pnl)
-                in_trade = False
+        for i in range(len(close)):
+            le = bool(long_entries.iloc[i])
+            lx = bool(long_exits.iloc[i]) if long_exits is not None else False
+            se = bool(short_entries.iloc[i]) if short_entries is not None else False
+            sx = bool(short_exits.iloc[i]) if short_exits is not None else False
+            px = float(close.iloc[i])
+
+            if position == 1 and lx:
+                pnl = px - entry_px
+                (gross_profit if pnl > 0 else gross_loss).__add__(abs(pnl))
+                gross_profit += max(0, pnl)
+                gross_loss   += max(0, -pnl)
+                position = 0
+            elif position == -1 and sx:
+                pnl = entry_px - px
+                gross_profit += max(0, pnl)
+                gross_loss   += max(0, -pnl)
+                position = 0
+
+            if position == 0 and le:
+                entry_px = px
+                position = 1
+            elif position == 0 and se:
+                entry_px = px
+                position = -1
+
         return gross_profit / gross_loss if gross_loss > 0 else 1.0
 
     @staticmethod
