@@ -2,18 +2,19 @@
 
 Automated trading bot designed for a $500 account. Scans stocks and forex every 15 minutes, scores signals across 8 independent categories, and sizes positions using confidence-tier Half-Kelly. Runs paper or live against IBKR (stocks) and OANDA (forex).
 
-**Version: v1.1.0**
+**Version: v1.2.0**
 
 ---
 
 ## What it does
 
-- Scans up to 25 instruments from a candidate pool, selects the best trending ones daily
+- Scans up to 40 instruments from a candidate pool, selects the best trending ones daily
 - Scores each instrument across 8 signal categories (trend, momentum, volume, macro, etc.)
 - Applies LLM-based macro risk assessment (Groq / Gemini) to reduce position size in high-risk environments
 - Sizes positions using a 4-tier Half-Kelly system (25/50/75/100% of max)
-- Enforces PDT rules, correlation guards, event blackouts (earnings, FOMC), and a circuit breaker
-- Sends Telegram notifications for trades, portfolio updates, and daily summaries
+- Enforces sector caps, PDT rules, correlation guards, event blackouts (earnings, FOMC), and a circuit breaker
+- Sends Telegram notifications with realized + unrealized P&L breakdowns
+- Restores open positions from DB automatically on restart — no lost trades
 - Persists all signals, trades, and snapshots to SQLite (dev) or PostgreSQL (prod)
 
 ---
@@ -86,14 +87,14 @@ main.py                         ← Entry point (paper / live / validate / optim
 
 | Score | Tier | Position size |
 |-------|------|---------------|
-| < 55 | NO_TRADE | 0% |
-| 55–64 | WATCH | 0% |
-| 65–74 | SMALL | 25% of max |
-| 75–84 | MEDIUM | 50% of max |
-| 85–94 | LARGE | 75% of max |
-| ≥ 95 | FULL | 100% of max |
+| < 45 | NO_TRADE | 0% |
+| 45–54 | WATCH | 0% |
+| 55–69 | SMALL | 25% of max |
+| 70–79 | MEDIUM | 50% of max |
+| 80–89 | LARGE | 75% of max |
+| ≥ 90 | FULL | 100% of max |
 
-**Max position: $333 (2/3 of $500 capital). Always keep $150 cash reserve.**
+**Capital: $2,000 total ($1,500 IBKR stocks + $500 OANDA forex). 20% cash reserve.**
 
 ### Macro risk gate (Cat8)
 
@@ -116,33 +117,37 @@ This scales down position size for wars, FOMC events, geopolitical shocks — wi
 - **Forex**: EUR/USD (primary, no PDT), GBP/USD (London session)
 
 ### Dynamic selection
-- **Weekly** (Monday 00:00 UTC): `PortfolioAgent` scores all 25 candidates on 60-day daily bars (full EMA stack gate). Selects top 6 stocks + 2 forex.
-- **Daily** (05:00 UTC, Tue–Sun): `PreScreenAgent` scores all 25 candidates on 30-day bars (softer EMA9 > EMA21 gate). Selects top 4 stocks + 2 forex. EUR/USD always force-included.
+- **Weekly** (Monday 00:00 UTC): `PortfolioAgent` scores all 40 candidates on 60-day daily bars (EMA9 > EMA21 gate). Selects top **8 stocks** (max 2 per sector) + 2 forex.
+- **Daily** (05:00 UTC, Tue–Sun): `PreScreenAgent` scores all 40 candidates on 30-day bars (same EMA9 > EMA21 gate). Selects top 4–8 stocks + 2 forex.
 
-### Candidate pool (25 instruments)
-ETFs: SPY, QQQ, IWM, GLD, XLK, XLF
+### Sector cap
+Max 2 stocks from any single sector (energy, gold, tech, etc.) to ensure diversification. Correlation conflicts between held positions are enforced at trade-entry time by `CorrelationGuard`.
+
+### Candidate pool (40 instruments)
+ETFs: SPY, QQQ, IWM, GLD, XLK, XLF, XLE
 Tech: AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA
 Finance: JPM, GS, BAC
 Healthcare: JNJ, UNH
-Energy: XOM, CVX
+Energy: XOM, CVX, OXY, COP, SLB, HAL, MPC, VLO
+Gold: GLD, GOLD, NEM, GDX, GDXJ
 Consumer: WMT, COST, CAT
 Forex: EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CAD, USD/CHF
 
 ---
 
-## Capital rules ($500 account)
+## Capital rules
 
 | Rule | Value |
 |------|-------|
-| Total capital | $500 |
-| Cash reserve | $150 (always) |
-| Max position | $333 |
-| Risk per trade | 1% = $5 |
+| Total capital | $2,000 ($1,500 IBKR + $500 OANDA) |
+| Cash reserve | 20% per broker pool |
+| Risk per trade | 1% of broker pool |
 | Max positions | 2 simultaneously |
-| Stop loss | 1.5% from entry |
-| Take profit | 3.0% from entry (2:1 R:R) |
+| Stop loss | 2× ATR (stocks), 1.5× ATR (forex) |
+| Take profit | 4× ATR (stocks), 3× ATR (forex) |
 | PDT limit | 3 day trades per 5-day window (stocks only) |
-| Correlation guard | Never hold SPY+QQQ, QQQ+NVDA, EUR/USD+GBP/USD |
+| Sector cap | Max 2 stocks per sector in universe |
+| Correlation guard | Blocks correlated simultaneous entries at scan time |
 
 ---
 
@@ -273,6 +278,15 @@ python main.py --mode optimize
 ---
 
 ## Changelog
+
+### v1.2.0 — Portfolio Diversification + Reliability
+- **Feature**: Sector cap (`MAX_PER_SECTOR=2`) — prevents any single sector from dominating all portfolio slots
+- **Feature**: `MAX_STOCKS` increased to 8; EMA gate softened to `EMA9 > EMA21` for earlier trend detection
+- **Feature**: Position restore on restart — `restore_from_db()` reloads open trades + stop/TP from latest snapshot automatically
+- **Feature**: Unrealized P&L tracking — hourly Telegram summary now shows realized, unrealized, and total P&L separately
+- **Feature**: Per-instrument confidence score logged at INFO level on every scan cycle
+- **Feature**: Dashboard shows live unrealized P&L per position with current price
+- **Fix**: Removed portfolio-level correlation guard (was blocking valid candidates); trade-level `CorrelationGuard` handles conflicts
 
 ### v1.1.0 — Dynamic Pre-Screen + Macro Risk Gate
 - **Feature**: `PreScreenAgent` — daily universe refresh at 05:00 UTC from full 25-instrument candidate pool (30-day lookback, soft EMA gate). EUR/USD always force-included as anchor.
