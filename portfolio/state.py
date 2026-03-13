@@ -109,18 +109,31 @@ class PortfolioStateManager:
     # Query helpers
     # ------------------------------------------------------------------
 
-    def deployed_capital(self) -> float:
-        """Sum of (entry_price * quantity) for all open positions."""
-        with self._lock:
-            return sum(p.cost_basis() for p in self._positions.values())
+    def deployed_capital(self, broker: str | None = None) -> float:
+        """Sum of (entry_price * quantity) for open positions.
 
-    def available_cash(self) -> float:
-        """Capital that can be used to open new positions.
-
-        = total_capital - cash_reserve - deployed_capital()
-        Never returns a value below 0.
+        If *broker* is given, only count positions held at that broker.
         """
-        avail = self._total_capital - self._cash_reserve - self.deployed_capital()
+        with self._lock:
+            positions = self._positions.values()
+            if broker is not None:
+                positions = [p for p in positions if p.broker == broker]
+            return sum(p.cost_basis() for p in positions)
+
+    def available_cash(self, broker: str | None = None) -> float:
+        """Capital available to open new positions.
+
+        If *broker* is given, uses that broker's configured capital pool
+        (IBKR_CAPITAL / OANDA_CAPITAL) minus what's already deployed there.
+        Falls back to the unified total_capital pool when no broker is given
+        or no per-broker capital is configured.
+        """
+        if broker is not None:
+            broker_cap = settings.bot.broker_capital(broker)
+            reserve = broker_cap * settings.bot.cash_reserve_pct
+            avail = broker_cap - reserve - self.deployed_capital(broker)
+        else:
+            avail = self._total_capital - self._cash_reserve - self.deployed_capital()
         return max(avail, 0.0)
 
     def position_count(self) -> int:
@@ -244,6 +257,70 @@ class PortfolioStateManager:
         # Remove from memory after successful DB write
         with self._lock:
             self._positions.pop(symbol, None)
+
+    def restore_from_db(self) -> int:
+        """Reload open positions from DB into memory on startup.
+
+        Queries the trades table for status='open' rows and the latest
+        portfolio snapshot for stop/TP prices, then reconstructs the
+        in-memory _positions dict.  Returns the number of positions restored.
+        """
+        session = get_session(self._database_url)
+        try:
+            open_trades = (
+                session.query(Trade)
+                .filter(Trade.status == "open")
+                .all()
+            )
+            if not open_trades:
+                return 0
+
+            # Build stop/TP lookup from latest snapshot's positions_detail
+            stop_tp: dict[str, dict] = {}
+            latest_snap = (
+                session.query(PortfolioSnapshot)
+                .order_by(PortfolioSnapshot.timestamp.desc())
+                .first()
+            )
+            if latest_snap and latest_snap.positions_detail:
+                details = latest_snap.positions_detail
+                if isinstance(details, str):
+                    import json
+                    details = json.loads(details)
+                for d in details:
+                    stop_tp[d["symbol"]] = d
+
+            restored = 0
+            for trade in open_trades:
+                detail = stop_tp.get(trade.symbol, {})
+                stop_price = detail.get("stop_price", trade.entry_price * (0.98 if trade.direction == "long" else 1.02))
+                tp_price   = detail.get("take_profit_price", trade.entry_price * (1.04 if trade.direction == "long" else 0.96))
+                pos = Position(
+                    symbol=trade.symbol,
+                    broker=trade.broker,
+                    direction=trade.direction,
+                    quantity=trade.quantity,
+                    entry_price=trade.entry_price,
+                    stop_price=stop_price,
+                    take_profit_price=tp_price,
+                    confidence=trade.confidence,
+                    position_tier=trade.position_tier,
+                    entry_time=trade.entry_time,
+                    db_trade_id=trade.id,
+                )
+                with self._lock:
+                    self._positions[trade.symbol] = pos
+                restored += 1
+                logger.info(
+                    "restore_from_db: reloaded %s %s entry=%.4f stop=%.4f tp=%.4f",
+                    trade.symbol, trade.direction, trade.entry_price, stop_price, tp_price,
+                )
+            return restored
+        except Exception:
+            logger.exception("restore_from_db: failed to restore positions")
+            return 0
+        finally:
+            session.close()
 
     def sync_from_broker(self, broker_positions: list[dict]) -> None:
         """Reconcile in-memory state with broker-reported positions.

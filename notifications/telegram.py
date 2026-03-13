@@ -182,14 +182,19 @@ class TelegramNotifier:
         daily_pnl: float,
         total_equity: float,
         trading_mode: str,
+        unrealized_pnl: float = 0.0,
     ) -> None:
-        pnl_emoji = "📈" if daily_pnl >= 0 else "📉"
-        sign = "+" if daily_pnl >= 0 else ""
+        total_pnl = daily_pnl + unrealized_pnl
+        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+        def _fmt(v: float) -> str:
+            return f"+${v:.2f}" if v >= 0 else f"-${abs(v):.2f}"
         msg = (
             f"{pnl_emoji} HOURLY SUMMARY  [{trading_mode.upper()}]\n"
             f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
             f"Open positions: {open_positions}\n"
-            f"Daily P&L:      {sign}${daily_pnl:.2f}\n"
+            f"Realized P&L:   {_fmt(daily_pnl)}\n"
+            f"Unrealized P&L: {_fmt(unrealized_pnl)}\n"
+            f"Total P&L:      {_fmt(total_pnl)}\n"
             f"Total equity:   ${total_equity:.2f}"
         )
         self.send(msg)

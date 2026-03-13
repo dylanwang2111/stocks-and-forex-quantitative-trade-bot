@@ -205,14 +205,33 @@ if page.startswith("1"):
     daily_pnl = snap.daily_pnl if snap and snap.daily_pnl is not None else 0.0
     open_pos_count = len(open_positions)
 
-    m1, m2, m3, m4 = st.columns(4)
+    # Unrealized P&L from current prices
+    unrealized_pnl = 0.0
+    try:
+        from data.fetcher import fetch_candles
+        for t in open_positions:
+            df = fetch_candles(t.symbol, "1h")
+            if df is not None and not df.empty:
+                current_price = float(df["close"].iloc[-1])
+                if t.direction == "long":
+                    unrealized_pnl += (current_price - t.entry_price) * t.quantity
+                else:
+                    unrealized_pnl += (t.entry_price - current_price) * t.quantity
+    except Exception:
+        pass
+
+    total_pnl = daily_pnl + unrealized_pnl
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
         st.metric("Total Capital", _fmt_usd(total_capital))
     with m2:
-        st.metric("Daily P&L", _fmt_usd(daily_pnl), delta=f"{daily_pnl:+.2f}")
+        st.metric("Realized P&L", _fmt_usd(daily_pnl), delta=f"{daily_pnl:+.2f}")
     with m3:
-        st.metric("Open Positions", open_pos_count)
+        st.metric("Unrealized P&L", _fmt_usd(unrealized_pnl), delta=f"{unrealized_pnl:+.2f}")
     with m4:
+        st.metric("Total P&L", _fmt_usd(total_pnl), delta=f"{total_pnl:+.2f}")
+    with m5:
         try:
             from portfolio.pdt_tracker import PDTTracker
             pdt = PDTTracker()
@@ -239,17 +258,31 @@ if page.startswith("1"):
     st.divider()
     st.subheader("Open Positions")
     if open_positions:
-        open_data = [
-            {
-                "symbol":        t.symbol,
-                "direction":     t.direction,
-                "position_tier": t.position_tier,
-                "quantity":      t.quantity,
-                "entry_price":   t.entry_price,
-                "entry_time":    t.entry_time,
-            }
-            for t in open_positions
-        ]
+        open_data = []
+        for t in open_positions:
+            current_price = None
+            unreal = None
+            try:
+                from data.fetcher import fetch_candles
+                df = fetch_candles(t.symbol, "1h")
+                if df is not None and not df.empty:
+                    current_price = round(float(df["close"].iloc[-1]), 4)
+                    if t.direction == "long":
+                        unreal = round((current_price - t.entry_price) * t.quantity, 2)
+                    else:
+                        unreal = round((t.entry_price - current_price) * t.quantity, 2)
+            except Exception:
+                pass
+            open_data.append({
+                "symbol":         t.symbol,
+                "direction":      t.direction,
+                "tier":           t.position_tier,
+                "qty":            t.quantity,
+                "entry_price":    t.entry_price,
+                "current_price":  current_price,
+                "unrealized_pnl": unreal,
+                "entry_time":     t.entry_time,
+            })
         st.dataframe(pd.DataFrame(open_data), width="stretch")
     else:
         st.info("No open positions")

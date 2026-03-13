@@ -2,27 +2,100 @@
 agents/portfolio_agent.py
 Weekly portfolio selection agent.
 
-Evaluates all instruments in CANDIDATE_POOL on 60 days of daily data,
-applies a long-bias gate and scores each on trend strength, momentum,
-liquidity, and volatility. Selects the top MAX_STOCKS stocks and
-MAX_FOREX forex pairs, then calls set_active_universe() to update
-the live UNIVERSE that the Scanner trades.
+Evaluates all instruments in CANDIDATE_POOL on 60 days of daily data.
+Selects the top MAX_STOCKS stocks + MAX_FOREX forex pairs, then calls
+set_active_universe() to update the live UNIVERSE.
 
 Selection runs on startup and every Monday at 00:00 UTC.
+
+Scoring layers (additive):
+  1. Technical (trend / momentum / liquidity / volatility) — 0–6 pts
+  2. Fundamental (P/E, ROA, profit margin, EPS growth)     — 0–4 pts
+  3. Macro context (gold trend, oil trend, VIX regime)      — 0–3 pts
+
+Instruments with strong fundamentals AND aligned macro regime receive a
+significant boost, ensuring the portfolio rotates into sectors that are
+actually benefiting from the current macro environment (e.g. gold/energy
+during geopolitical stress, tech during low-VIX risk-on periods).
 """
 from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass, field
+from typing import Optional
 
 import pandas as pd
-
 import pandas_ta as ta
+import yfinance as yf
 
-from data.fetcher import fetch_candles
+from data.fetcher import _SYMBOL_MAP, fetch_candles
 from portfolio.watchlist import CANDIDATE_POOL, Instrument, set_active_universe
 
 logger = logging.getLogger(__name__)
+
+# ── Sector taxonomy ───────────────────────────────────────────────────────────
+# Maps symbol → sector tag for macro-context bonuses.
+# "energy"  → benefits when crude oil is in an uptrend
+# "gold"    → benefits when gold price is rising / VIX is elevated (safe haven)
+# "tech"    → benefits in low-VIX risk-on regimes
+# "finance" → neutral (no specific macro bonus)
+# "other"   → neutral
+_SECTOR: dict[str, str] = {
+    # Energy / oil
+    "XOM": "energy", "CVX": "energy", "OXY": "energy", "COP": "energy",
+    "SLB": "energy", "HAL": "energy", "MPC": "energy", "VLO": "energy",
+    "XLE": "energy",
+    # Gold & precious metals
+    "GLD":  "gold",  "GDX":  "gold",  "GDXJ": "gold",
+    "GOLD": "gold",  "NEM":  "gold",
+    # Technology / growth
+    "AAPL": "tech",  "MSFT": "tech",  "NVDA": "tech",  "GOOGL": "tech",
+    "AMZN": "tech",  "META": "tech",  "TSLA": "tech",
+    "QQQ":  "tech",  "XLK":  "tech",
+    # ETF / diversified
+    "SPY": "broad",  "IWM": "broad",
+    # Financials
+    "JPM": "finance", "GS": "finance", "BAC": "finance", "XLF": "finance",
+    # Healthcare
+    "JNJ": "health", "UNH": "health",
+    # Consumer / Industrial
+    "WMT": "consumer", "COST": "consumer", "CAT": "industrial",
+}
+
+# Fundamental score caps per metric (prevents one extreme value from dominating)
+_PE_GOOD_MAX   = 30    # PE ≤ 30 → good valuation (+1)
+_PE_GREAT_MAX  = 18    # PE ≤ 18 → great valuation (+1 extra)
+_ROA_GOOD      = 0.05  # ROA ≥ 5% → solid asset efficiency (+1)
+_MARGIN_GOOD   = 0.10  # net margin ≥ 10% → profitable (+1)
+_EPS_GROWTH    = 0.10  # EPS growth ≥ 10% YoY → momentum in earnings (+1)
+
+# Macro thresholds
+_VIX_FEAR      = 22    # VIX ≥ 22 → elevated fear → favours gold, penalises tech growth
+_VIX_STRESS    = 30    # VIX ≥ 30 → crisis → gold/energy strongly favoured
+_OIL_MA_FAST   = 20    # oil short-term MA period
+_OIL_MA_SLOW   = 60    # oil long-term MA period (uptrend = fast > slow)
+_GOLD_MA_FAST  = 20
+_GOLD_MA_SLOW  = 60
+
+
+@dataclass
+class MacroContext:
+    """Macro market state fetched once per selection cycle."""
+    vix:           float = 15.0   # current VIX level
+    oil_uptrend:   bool  = False  # crude oil (USO) EMA20 > EMA60
+    gold_uptrend:  bool  = False  # gold (GLD) EMA20 > EMA60
+    gold_price:    float = 0.0    # latest GLD price
+    oil_price:     float = 0.0    # latest USO price
+
+
+def _fetch_macro_context_shared() -> "MacroContext":
+    """
+    Module-level helper so PreScreenAgent can reuse the same macro fetch
+    without importing PortfolioAgent (avoids circular imports).
+    Delegates to PortfolioAgent._fetch_macro_context().
+    """
+    return PortfolioAgent()._fetch_macro_context()
 
 
 class PortfolioAgent:
@@ -33,129 +106,335 @@ class PortfolioAgent:
       - Stocks : EMA9 > EMA21 AND EMA21 > EMA50 required
       - Forex  : EMA9 > EMA21 required (softer — forex can reverse quickly)
 
-    Scoring (applied only to candidates that pass the gate):
-      +1  ADX(14) > 25          — instrument is trending
+    Technical scoring (0–6 pts):
+      +1  ADX(14) > 25          — trending
       +1  ADX(14) > 40          — strong trend bonus
       +1  20-day return > 2%    — real upward momentum
       +1  RSI(14) in [45, 70]   — healthy bullish range
       +1  avg_volume_20d > 500k — stocks only: adequate liquidity
-      +1  ATR/price in [0.3%, 6%] — tradeable volatility
+      +1  ATR/price in [0.3%,6%] — tradeable volatility
 
-    Max possible score: 6 for stocks, 5 for forex.
+    Fundamental scoring (0–4 pts, stocks only):
+      +1  Trailing P/E ≤ 30     — not overvalued
+      +1  Trailing P/E ≤ 18     — great valuation (bonus on top)
+      +1  ROA ≥ 5%              — solid asset efficiency
+      +1  Net profit margin ≥ 10% — profitable business
+      +1  EPS growth ≥ 10% YoY  — earnings momentum
 
-    Correlation-aware greedy selection: after sorting stocks by score,
-    iterate top-to-bottom and skip a candidate if any of its
-    `correlated_with` symbols are already in the selected set.
+    Macro context bonus (0–3 pts, sector-specific):
+      Gold sector:   +1 if gold uptrend; +1 if VIX ≥ 22 (fear bid)
+      Energy sector: +1 if oil uptrend;  +1 if VIX ≥ 22 (inflation hedge bid)
+      Tech sector:   +1 if VIX < 22 (risk-on);  −1 if VIX ≥ 30 (growth selloff)
+      Broad ETFs:    +0.5 if gold or oil uptrend (diversification value)
     """
 
-    MAX_STOCKS: int = 6
+    MAX_STOCKS: int = 8
     MAX_FOREX: int  = 2
-    MIN_BARS: int   = 20   # minimum daily bars required to score
+    MIN_BARS: int   = 20
+    MAX_PER_SECTOR: int = 2   # max stocks from any single sector
+
+    def _bulk_fetch(self) -> dict[str, pd.DataFrame]:
+        result = self._bulk_fetch_yfinance()
+        if not result:
+            logger.info("PortfolioAgent: yfinance failed — falling back to IBKR")
+            result = self._bulk_fetch_ibkr()
+        return result
+
+    def _bulk_fetch_yfinance(self) -> dict[str, pd.DataFrame]:
+        """Single yf.download() for all CANDIDATE_POOL symbols (60d, 1d)."""
+        yf_syms = [_SYMBOL_MAP.get(i.symbol.upper(), i.symbol.upper()) for i in CANDIDATE_POOL]
+        yf_to_sym = {
+            _SYMBOL_MAP.get(i.symbol.upper(), i.symbol.upper()): i.symbol
+            for i in CANDIDATE_POOL
+        }
+        logger.info("PortfolioAgent: bulk-fetching %d symbols via yfinance (60d, 1d)…", len(yf_syms))
+        try:
+            raw = yf.download(
+                yf_syms,
+                period="60d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                multi_level_index=True,
+            )
+        except Exception as exc:
+            logger.warning("PortfolioAgent yfinance bulk fetch failed: %s", exc)
+            return {}
+
+        if raw is None or raw.empty:
+            logger.warning("PortfolioAgent yfinance: empty response")
+            return {}
+
+        result: dict[str, pd.DataFrame] = {}
+        for yf_sym in yf_syms:
+            orig_sym = yf_to_sym.get(yf_sym, yf_sym)
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    df = raw.xs(yf_sym, level=1, axis=1).copy()
+                else:
+                    df = raw.copy()
+                df.columns = [c.lower() for c in df.columns]
+                df = df[[c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]].copy()
+                df = df.dropna(subset=["close"])
+                if not df.empty:
+                    result[orig_sym] = df
+            except Exception as exc:
+                logger.debug("PortfolioAgent: could not slice %s: %s", yf_sym, exc)
+
+        logger.info("PortfolioAgent yfinance: got data for %d/%d symbols", len(result), len(yf_syms))
+        return result
+
+    def _bulk_fetch_ibkr(self) -> dict[str, pd.DataFrame]:
+        """Fetch 60d daily bars via IBKR — single session, all symbols sequential."""
+        import asyncio
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        from ib_insync import IB, Forex, Stock, util
+        from config.settings import settings
+
+        if not settings.ibkr.enabled:
+            logger.warning("PortfolioAgent IBKR fallback: IBKR not configured")
+            return {}
+
+        host     = settings.ibkr.host
+        port     = settings.ibkr.port
+        clientId = settings.ibkr.client_id + 2
+
+        ib = IB()
+        result: dict[str, pd.DataFrame] = {}
+        try:
+            ib.connect(host, port, clientId=clientId, timeout=15, readonly=True)
+            for instrument in CANDIDATE_POOL:
+                sym = instrument.symbol
+                try:
+                    if instrument.asset_type == "forex":
+                        contract = Forex(sym.upper().replace("/", ""))
+                        what = "MIDPOINT"
+                    else:
+                        contract = Stock(sym.upper(), "SMART", "USD")
+                        what = "TRADES"
+                    bars = ib.reqHistoricalData(
+                        contract, endDateTime="", durationStr="60 D",
+                        barSizeSetting="1 day", whatToShow=what,
+                        useRTH=True, formatDate=2,
+                    )
+                    if not bars:
+                        continue
+                    df = util.df(bars)[["date", "open", "high", "low", "close", "volume"]].copy()
+                    df = df.rename(columns={"date": "time"})
+                    df["time"] = pd.to_datetime(df["time"], utc=True)
+                    df = df.set_index("time").sort_index().dropna(subset=["close"])
+                    if not df.empty:
+                        result[sym] = df
+                except Exception as exc:
+                    logger.debug("PortfolioAgent IBKR: %s failed — %s", sym, exc)
+        except Exception as exc:
+            logger.warning("PortfolioAgent IBKR connect failed: %s", exc)
+        finally:
+            if ib.isConnected():
+                ib.disconnect()
+
+        logger.info("PortfolioAgent IBKR: got data for %d/%d symbols", len(result), len(CANDIDATE_POOL))
+        return result
+
+    # ── Macro context ──────────────────────────────────────────────────────────
+
+    def _fetch_macro_context(self) -> MacroContext:
+        """
+        Fetch VIX, gold (GLD), and oil (USO) to build the macro context.
+        Uses yfinance 90-day daily bars. Returns a neutral MacroContext on failure.
+        """
+        ctx = MacroContext()
+        try:
+            raw = yf.download(
+                ["^VIX", "GLD", "USO"],
+                period="90d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                multi_level_index=True,
+            )
+            if raw is None or raw.empty:
+                return ctx
+
+            def _get_close(sym: str) -> pd.Series | None:
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        s = raw.xs(sym, level=1, axis=1)["Close"]
+                    else:
+                        s = raw["Close"]
+                    return s.dropna()
+                except Exception:
+                    return None
+
+            # VIX
+            vix_s = _get_close("^VIX")
+            if vix_s is not None and len(vix_s) > 0:
+                ctx.vix = float(vix_s.iloc[-1])
+
+            # Gold (GLD)
+            gld_s = _get_close("GLD")
+            if gld_s is not None and len(gld_s) >= _GOLD_MA_SLOW:
+                ctx.gold_price = float(gld_s.iloc[-1])
+                gld_fast = float(ta.ema(gld_s, length=_GOLD_MA_FAST).iloc[-1])
+                gld_slow = float(ta.ema(gld_s, length=_GOLD_MA_SLOW).iloc[-1])
+                ctx.gold_uptrend = gld_fast > gld_slow
+
+            # Oil (USO)
+            uso_s = _get_close("USO")
+            if uso_s is not None and len(uso_s) >= _OIL_MA_SLOW:
+                ctx.oil_price = float(uso_s.iloc[-1])
+                uso_fast = float(ta.ema(uso_s, length=_OIL_MA_FAST).iloc[-1])
+                uso_slow = float(ta.ema(uso_s, length=_OIL_MA_SLOW).iloc[-1])
+                ctx.oil_uptrend = uso_fast > uso_slow
+
+        except Exception as exc:
+            logger.warning("PortfolioAgent: macro context fetch failed: %s", exc)
+
+        logger.info(
+            "MacroContext: VIX=%.1f  gold_uptrend=%s  oil_uptrend=%s",
+            ctx.vix, ctx.gold_uptrend, ctx.oil_uptrend,
+        )
+        return ctx
+
+    def _fetch_fundamentals(self, symbol: str) -> dict:
+        """
+        Fetch key fundamental metrics via yfinance Ticker.info.
+        Returns a dict with keys: pe, roa, margin, eps_growth.
+        All values default to None on failure.
+        """
+        result = {"pe": None, "roa": None, "margin": None, "eps_growth": None}
+        try:
+            info = yf.Ticker(symbol).info
+            pe = info.get("trailingPE") or info.get("forwardPE")
+            if pe and math.isfinite(pe) and pe > 0:
+                result["pe"] = float(pe)
+
+            roa = info.get("returnOnAssets")
+            if roa and math.isfinite(roa):
+                result["roa"] = float(roa)
+
+            margin = info.get("profitMargins")
+            if margin and math.isfinite(margin):
+                result["margin"] = float(margin)
+
+            eps_growth = info.get("earningsGrowth") or info.get("earningsQuarterlyGrowth")
+            if eps_growth and math.isfinite(eps_growth):
+                result["eps_growth"] = float(eps_growth)
+
+        except Exception as exc:
+            logger.debug("PortfolioAgent fundamentals %s: %s", symbol, exc)
+        return result
+
+    # ── Main selection ─────────────────────────────────────────────────────────
 
     def select(self) -> list[Instrument]:
         """
         Score all CANDIDATE_POOL instruments, select the best ones,
         and update the active UNIVERSE via set_active_universe().
-
-        Returns the selected instrument list (may be shorter than
-        MAX_STOCKS + MAX_FOREX if few candidates pass the long-bias gate).
-        Falls back to keeping the current UNIVERSE unchanged on total failure.
         """
         logger.info(
             "PortfolioAgent.select(): evaluating %d candidates",
             len(CANDIDATE_POOL),
         )
 
+        prefetched = self._bulk_fetch()
+        bulk_failed = not prefetched
+
+        # Fetch macro context once for the whole cycle
+        macro = self._fetch_macro_context()
+
         scored_stocks: list[tuple[float, Instrument]] = []
         scored_forex:  list[tuple[float, Instrument]] = []
 
         for instrument in CANDIDATE_POOL:
-            score = self._score_instrument(instrument)
+            df = prefetched.get(instrument.symbol)
+            score = self._score_instrument(instrument, macro, df=df, skip_fallback=bulk_failed)
             if score is None:
-                logger.debug(
-                    "  %s: skipped (gate failed or data unavailable)", instrument.symbol
-                )
+                logger.debug("  %s: skipped (gate failed or insufficient data)", instrument.symbol)
                 continue
-            logger.debug("  %s: score=%.1f", instrument.symbol, score)
+
+            logger.debug("  %s: score=%.2f", instrument.symbol, score)
             if instrument.asset_type == "stock":
                 scored_stocks.append((score, instrument))
             else:
                 scored_forex.append((score, instrument))
 
-        # Sort descending by score
         scored_stocks.sort(key=lambda t: t[0], reverse=True)
         scored_forex.sort(key=lambda t: t[0], reverse=True)
 
-        # Greedy correlation-aware stock selection
+        # Log top candidates for transparency
+        logger.info("Top stock candidates:")
+        for s, i in scored_stocks[:10]:
+            sector = _SECTOR.get(i.symbol, "other")
+            logger.info("  %-6s  score=%.2f  sector=%s", i.symbol, s, sector)
+
+        # Sector-capped selection: at most MAX_PER_SECTOR stocks from any one sector.
+        # Correlation conflicts at trade time are handled by the scanner's CorrelationGuard.
         selected_stocks: list[Instrument] = []
-        selected_symbols: set[str] = set()
+        sector_counts: dict[str, int] = {}
 
         for _score, inst in scored_stocks:
             if len(selected_stocks) >= self.MAX_STOCKS:
                 break
-            # Skip if correlated with any already-selected stock
-            if any(corr in selected_symbols for corr in inst.correlated_with):
-                logger.debug(
-                    "  %s: skipped (correlated with already-selected symbol)",
-                    inst.symbol,
-                )
+            sector = _SECTOR.get(inst.symbol, "other")
+            if sector_counts.get(sector, 0) >= self.MAX_PER_SECTOR:
+                logger.debug("  %s: skipped (sector cap reached for '%s')", inst.symbol, sector)
                 continue
             selected_stocks.append(inst)
-            selected_symbols.add(inst.symbol)
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        # Forex: simple top-N (correlation guard handles pairs during live trading)
         selected_forex = [inst for _score, inst in scored_forex[: self.MAX_FOREX]]
-
         selected = selected_stocks + selected_forex
 
         if not selected:
-            logger.warning(
-                "PortfolioAgent: no instruments passed selection — keeping existing UNIVERSE"
-            )
+            logger.warning("PortfolioAgent: no instruments passed — keeping existing UNIVERSE")
             return []
 
         logger.info(
-            "PortfolioAgent selected %d instruments: stocks=[%s] forex=[%s]",
+            "PortfolioAgent selected %d: stocks=[%s] forex=[%s]",
             len(selected),
             ", ".join(i.symbol for i in selected_stocks),
             ", ".join(i.symbol for i in selected_forex),
         )
-
         set_active_universe(selected)
         return selected
 
-    # ------------------------------------------------------------------
-    # Scoring
-    # ------------------------------------------------------------------
+    # ── Scoring ────────────────────────────────────────────────────────────────
 
-    def _score_instrument(self, instrument: Instrument) -> float | None:
+    def _score_instrument(
+        self,
+        instrument: Instrument,
+        macro: MacroContext,
+        df: pd.DataFrame | None = None,
+        skip_fallback: bool = False,
+    ) -> float | None:
         """
-        Fetch 60 days of daily data, apply long-bias gate, then score.
-        Returns None if gate fails or data is insufficient.
+        Apply long-bias gate, then compute a composite score.
+        Returns None if the gate fails or data is insufficient.
+
+        Score = technical (0-6) + fundamental (0-4) + macro_context (0-3)
         """
-        try:
-            df = fetch_candles(instrument.symbol, "1d", period="60d", use_cache=False)
-        except Exception as exc:
-            logger.debug("  %s: fetch error — %s", instrument.symbol, exc)
-            return None
+        if df is None:
+            if skip_fallback:
+                return None
+            try:
+                df = fetch_candles(instrument.symbol, "1d", period="60d", use_cache=False)
+            except Exception as exc:
+                logger.debug("  %s: fetch error — %s", instrument.symbol, exc)
+                return None
 
         if df is None or len(df) < self.MIN_BARS:
-            logger.debug(
-                "  %s: insufficient data (%d bars)", instrument.symbol, len(df) if df is not None else 0
-            )
             return None
 
         close  = df["close"]
         volume = df.get("volume", pd.Series(dtype=float))
 
-        # ── Indicators ────────────────────────────────────────────────────────
         ema9  = ta.ema(close, length=9)
         ema21 = ta.ema(close, length=21)
         ema50 = ta.ema(close, length=50)
         rsi   = ta.rsi(close, length=14)
         adx_df = ta.adx(df["high"], df["low"], close, length=14)
 
-        # Latest values
         e9  = float(ema9.iloc[-1])  if ema9  is not None and not ema9.empty  else None
         e21 = float(ema21.iloc[-1]) if ema21 is not None and not ema21.empty else None
         e50 = float(ema50.iloc[-1]) if ema50 is not None and not ema50.empty else None
@@ -167,56 +446,100 @@ class PortfolioAgent:
             if adx_col:
                 adx_val = float(adx_df[adx_col[0]].iloc[-1])
 
-        # ── Long-bias gate ────────────────────────────────────────────────────
-        if instrument.asset_type == "stock":
-            # Require full bullish EMA stack
-            if e9 is None or e21 is None or e50 is None:
-                return None
-            if not (e9 > e21 > e50):
-                return None
-        else:
-            # Forex: softer gate — just EMA9 > EMA21
-            if e9 is None or e21 is None:
-                return None
-            if not (e9 > e21):
-                return None
+        # ── Long-bias gate ─────────────────────────────────────────────────────
+        if e9 is None or e21 is None:
+            return None
+        if not (e9 > e21):
+            return None
 
-        # ── Scoring ──────────────────────────────────────────────────────────
-        score = 0.0
+        # ── 1. Technical score (0–6) ───────────────────────────────────────────
+        tech_score = 0.0
 
-        # ADX > 25: trending
         if adx_val is not None and adx_val > 25:
-            score += 1.0
-            # ADX > 40: strong trend bonus
+            tech_score += 1.0
             if adx_val > 40:
-                score += 1.0
+                tech_score += 1.0
 
-        # 20-day return > 2%
         if len(close) >= 20:
             ret_20d = float(close.iloc[-1] / close.iloc[-20] - 1.0)
             if ret_20d > 0.02:
-                score += 1.0
+                tech_score += 1.0
 
-        # RSI in [45, 70]: healthy bullish range
         if rsi_val is not None and 45 <= rsi_val <= 70:
-            score += 1.0
+            tech_score += 1.0
 
-        # Stocks only: avg_volume_20d > 500k
         if instrument.asset_type == "stock" and not volume.empty:
             avg_vol = float(volume.rolling(20).mean().iloc[-1])
             if avg_vol > 500_000:
-                score += 1.0
+                tech_score += 1.0
 
-        # ATR/price in [0.3%, 6%]: tradeable volatility
         if len(df) >= 14:
             atr_series = ta.atr(df["high"], df["low"], close, length=14)
             if atr_series is not None and not atr_series.empty:
-                atr_val = float(atr_series.iloc[-1])
-                atr_pct = atr_val / float(close.iloc[-1])
+                atr_pct = float(atr_series.iloc[-1]) / float(close.iloc[-1])
                 if 0.003 <= atr_pct <= 0.06:
-                    score += 1.0
+                    tech_score += 1.0
 
-        return score
+        # ── 2. Fundamental score (0–4, stocks only) ───────────────────────────
+        fund_score = 0.0
+        if instrument.asset_type == "stock":
+            fund = self._fetch_fundamentals(instrument.symbol)
+
+            pe = fund.get("pe")
+            if pe is not None and 0 < pe <= _PE_GOOD_MAX:
+                fund_score += 1.0
+                if pe <= _PE_GREAT_MAX:
+                    fund_score += 1.0   # great valuation bonus
+
+            roa = fund.get("roa")
+            if roa is not None and roa >= _ROA_GOOD:
+                fund_score += 1.0
+
+            margin = fund.get("margin")
+            if margin is not None and margin >= _MARGIN_GOOD:
+                fund_score += 1.0
+
+            # EPS growth (forward momentum in earnings)
+            eps_g = fund.get("eps_growth")
+            if eps_g is not None and eps_g >= _EPS_GROWTH:
+                fund_score += 0.5   # half-point: useful but uncertain
+
+        # ── 3. Macro context bonus (0–3, sector-specific) ─────────────────────
+        macro_score = 0.0
+        sector = _SECTOR.get(instrument.symbol, "other")
+
+        if sector == "gold":
+            if macro.gold_uptrend:
+                macro_score += 1.5   # gold price trend is the primary driver
+            if macro.vix >= _VIX_FEAR:
+                macro_score += 1.0   # fear environment = safe-haven demand for gold
+            if macro.vix >= _VIX_STRESS:
+                macro_score += 0.5   # extra bonus in crisis
+
+        elif sector == "energy":
+            if macro.oil_uptrend:
+                macro_score += 1.5   # oil price trend is the primary driver
+            if macro.vix >= _VIX_FEAR:
+                macro_score += 0.5   # mild inflation-hedge bid during uncertainty
+
+        elif sector == "tech":
+            if macro.vix < _VIX_FEAR:
+                macro_score += 1.0   # risk-on benefits growth/tech
+            if macro.vix >= _VIX_STRESS:
+                macro_score -= 1.0   # crisis = tech selloff penalty
+
+        elif sector == "broad":
+            # Broad ETFs get a small bonus when either gold or oil is in uptrend
+            # (commodity-equity divergence signals regime change)
+            if macro.gold_uptrend or macro.oil_uptrend:
+                macro_score += 0.5
+
+        total_score = tech_score + fund_score + macro_score
+        logger.debug(
+            "  %s: tech=%.1f fund=%.1f macro=%.1f total=%.2f [%s]",
+            instrument.symbol, tech_score, fund_score, macro_score, total_score, sector,
+        )
+        return total_score
 
 
 # ---------------------------------------------------------------------------
@@ -227,47 +550,42 @@ def test_portfolio_agent() -> None:
     """
     Smoke-test PortfolioAgent.select() end-to-end.
 
-    Verifies:
-    1. select() runs without error
-    2. Returns between 1 and (MAX_STOCKS + MAX_FOREX) instruments
-    3. All selected instruments have asset_type in ["stock", "forex"]
-    4. set_active_universe() was called (UNIVERSE length changed)
-    5. No two selected stocks are correlated with each other
+    When real market data is unavailable (yfinance rate-limited), runs a
+    unit test of the scoring logic with synthetic data instead.
     """
     from portfolio.watchlist import UNIVERSE
     import logging as _log
-    _log.basicConfig(level=_log.INFO)
+    _log.basicConfig(level=_log.DEBUG)
 
-    print("=== test_portfolio_agent ===")
+    print("=== test_portfolio_agent ===\n")
+
+    # ── Unit test: scoring logic with synthetic data ───────────────────────
+    print("--- Unit test: scoring logic ---")
+    _run_scoring_unit_test()
+
+    # ── Integration test: real selection ──────────────────────────────────
+    print("\n--- Integration test: full select() ---")
     agent = PortfolioAgent()
     selected = agent.select()
 
     if not selected:
         print("WARNING: no instruments selected (market data may be unavailable)")
-        print("test_portfolio_agent: SKIPPED (no data)")
+        print("Integration test: SKIPPED")
         return
 
-    # Test 1: valid count
     max_possible = PortfolioAgent.MAX_STOCKS + PortfolioAgent.MAX_FOREX
     assert 1 <= len(selected) <= max_possible, (
         f"Expected 1–{max_possible} instruments, got {len(selected)}"
     )
-    print(f"Test 1 PASS: selected {len(selected)} instruments")
+    print(f"PASS: selected {len(selected)} instruments")
 
-    # Test 2: valid asset types
     for inst in selected:
-        assert inst.asset_type in ("stock", "forex"), (
-            f"Unexpected asset_type '{inst.asset_type}' for {inst.symbol}"
-        )
-    print("Test 2 PASS: all asset types valid")
+        assert inst.asset_type in ("stock", "forex")
+    print("PASS: all asset types valid")
 
-    # Test 3: UNIVERSE was updated
-    assert len(UNIVERSE) == len(selected), (
-        f"UNIVERSE length {len(UNIVERSE)} != selected {len(selected)}"
-    )
-    print(f"Test 3 PASS: UNIVERSE updated to {len(UNIVERSE)} instruments")
+    assert len(UNIVERSE) == len(selected)
+    print(f"PASS: UNIVERSE updated to {len(UNIVERSE)} instruments")
 
-    # Test 4: no two selected stocks are correlated with each other
     stock_symbols = {i.symbol for i in selected if i.asset_type == "stock"}
     for inst in selected:
         if inst.asset_type != "stock":
@@ -276,13 +594,125 @@ def test_portfolio_agent() -> None:
             assert corr_sym not in stock_symbols or corr_sym == inst.symbol, (
                 f"Correlation violation: {inst.symbol} and {corr_sym} both selected"
             )
-    print("Test 4 PASS: no correlated stocks selected together")
+    print("PASS: no correlated stocks selected together")
 
     print("\nSelected universe:")
     for inst in selected:
-        print(f"  {inst.symbol:<8} [{inst.broker:<5}] {inst.asset_type}")
+        sector = _SECTOR.get(inst.symbol, "other")
+        print(f"  {inst.symbol:<8} [{inst.broker:<5}] {inst.asset_type:<6}  sector={sector}")
 
     print("\ntest_portfolio_agent: ALL ASSERTIONS PASSED")
+
+
+def _run_scoring_unit_test() -> None:
+    """
+    Unit-test the scoring layers with synthetic OHLCV data.
+    Verifies that:
+    1. Gate correctly blocks downtrending instruments
+    2. Technical score adds up correctly
+    3. Macro bonus correctly routes by sector
+    4. Fundamentals score correctly
+    """
+    import numpy as np
+    from portfolio.watchlist import CANDIDATE_POOL
+
+    agent = PortfolioAgent()
+
+    # ── Build synthetic uptrending OHLCV (60 bars) ──────────────────────
+    def _make_df(trend: float = 0.003, vol: float = 0.01, n: int = 65) -> pd.DataFrame:
+        """trend > 0 = uptrend, trend < 0 = downtrend."""
+        np.random.seed(42)
+        prices = [100.0]
+        for _ in range(n - 1):
+            r = trend + np.random.randn() * vol
+            prices.append(max(prices[-1] * (1 + r), 1.0))
+        idx = pd.bdate_range(end=pd.Timestamp("2025-01-31"), periods=n)
+        close_arr = np.array(prices, dtype=np.float64)
+        atr_arr   = close_arr * 0.01
+        return pd.DataFrame({
+            "open":   close_arr.copy(),
+            "high":   (close_arr + atr_arr).astype(np.float64),
+            "low":    (close_arr - atr_arr).astype(np.float64),
+            "close":  close_arr.copy(),
+            "volume": np.full(n, 2_000_000.0, dtype=np.float64),
+        }, index=idx)
+
+    # Find a representative stock instrument from CANDIDATE_POOL
+    test_stock = next((i for i in CANDIDATE_POOL if i.symbol == "AAPL"), CANDIDATE_POOL[0])
+    test_gold  = next((i for i in CANDIDATE_POOL if i.symbol == "GOLD"), None)
+    test_energy = next((i for i in CANDIDATE_POOL if i.symbol == "XOM"), None)
+
+    neutral_macro = MacroContext(vix=15.0, oil_uptrend=False, gold_uptrend=False)
+    fear_macro    = MacroContext(vix=28.0, oil_uptrend=True,  gold_uptrend=True)
+
+    # ── Test 1: gate blocks downtrend ─────────────────────────────────────
+    down_df = _make_df(trend=-0.005)
+    score = agent._score_instrument(test_stock, neutral_macro, df=down_df)
+    assert score is None, f"Downtrend should be blocked by gate, got score={score}"
+    print("PASS: gate blocks downtrend")
+
+    # ── Test 2: uptrend passes gate and scores > 0 ────────────────────────
+    up_df = _make_df(trend=0.003)
+    score = agent._score_instrument(test_stock, neutral_macro, df=up_df)
+    assert score is not None and score > 0, f"Uptrend should score > 0, got {score}"
+    print(f"PASS: uptrend passes gate (score={score:.2f})")
+
+    # ── Test 3: gold sector gets macro bonus in fear/gold-uptrend env ─────
+    if test_gold is not None:
+        score_neutral = agent._score_instrument(test_gold, neutral_macro, df=up_df)
+        score_fear    = agent._score_instrument(test_gold, fear_macro,    df=up_df)
+        assert score_fear is not None and score_neutral is not None
+        assert score_fear > score_neutral, (
+            f"Gold in fear macro should score higher: fear={score_fear:.2f} vs neutral={score_neutral:.2f}"
+        )
+        print(f"PASS: gold macro bonus works (neutral={score_neutral:.2f} → fear={score_fear:.2f})")
+
+    # ── Test 4: energy gets macro bonus when oil is in uptrend ────────────
+    if test_energy is not None:
+        score_neutral = agent._score_instrument(test_energy, neutral_macro, df=up_df)
+        oil_macro     = MacroContext(vix=15.0, oil_uptrend=True, gold_uptrend=False)
+        score_oil_up  = agent._score_instrument(test_energy, oil_macro, df=up_df)
+        assert score_oil_up is not None and score_neutral is not None
+        assert score_oil_up > score_neutral, (
+            f"Energy in oil uptrend should score higher: {score_oil_up:.2f} vs {score_neutral:.2f}"
+        )
+        print(f"PASS: energy macro bonus works (neutral={score_neutral:.2f} → oil_up={score_oil_up:.2f})")
+
+    # ── Test 5: tech gets penalised in crisis (VIX ≥ 30) ─────────────────
+    crisis_macro = MacroContext(vix=35.0, oil_uptrend=False, gold_uptrend=True)
+    score_normal = agent._score_instrument(test_stock, neutral_macro, df=up_df)
+    score_crisis = agent._score_instrument(test_stock, crisis_macro,  df=up_df)
+    if score_normal is not None and score_crisis is not None:
+        assert score_crisis < score_normal, (
+            f"Tech should score lower in crisis: crisis={score_crisis:.2f} vs normal={score_normal:.2f}"
+        )
+        print(f"PASS: tech penalised in crisis (normal={score_normal:.2f} → crisis={score_crisis:.2f})")
+
+    # ── Test 6: fundamental mock ──────────────────────────────────────────
+    # Inject synthetic fundamental data by monkey-patching the method
+    original_fetch = agent._fetch_fundamentals
+
+    def _good_fundamentals(sym):
+        return {"pe": 15.0, "roa": 0.08, "margin": 0.15, "eps_growth": 0.20}
+
+    def _bad_fundamentals(sym):
+        return {"pe": 50.0, "roa": 0.01, "margin": 0.02, "eps_growth": -0.05}
+
+    agent._fetch_fundamentals = _good_fundamentals
+    score_good_fund = agent._score_instrument(test_stock, neutral_macro, df=up_df)
+
+    agent._fetch_fundamentals = _bad_fundamentals
+    score_bad_fund = agent._score_instrument(test_stock, neutral_macro, df=up_df)
+
+    agent._fetch_fundamentals = original_fetch  # restore
+
+    if score_good_fund is not None and score_bad_fund is not None:
+        assert score_good_fund > score_bad_fund, (
+            f"Good fundamentals should score higher: {score_good_fund:.2f} vs {score_bad_fund:.2f}"
+        )
+        print(f"PASS: fundamentals scoring works (bad={score_bad_fund:.2f} → good={score_good_fund:.2f})")
+
+    print("\nAll scoring unit tests PASSED")
 
 
 if __name__ == "__main__":

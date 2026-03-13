@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
+import pandas_ta as ta
 
 from agents.confidence_scorer import ConfidenceResult, ConfidenceScorer
 from agents.signal_engine import SignalBundle, SignalEngine
@@ -55,6 +56,9 @@ class ScanResult:
     blocked: bool
     block_reason: str
     scan_time: datetime = field(default_factory=datetime.utcnow)
+    atr: Optional[float] = None          # ATR(14) from 1h data — for adaptive stops
+    ema50: Optional[float] = None        # EMA50 from 1h data — short-term trend filter
+    current_price: Optional[float] = None  # cached close price from 1h data
 
 
 # ---------------------------------------------------------------------------
@@ -163,21 +167,12 @@ class Scanner:
     def top_opportunity(self, results: list[ScanResult]) -> Optional[ScanResult]:
         """
         Return the single best unblocked, tradeable opportunity.
-
-        Filters to results where:
-          - not blocked
-          - confidence_result.tradeable() is True (position_tier >= SMALL)
-        Then sorts by dominant_score DESC and returns the first element,
-        or None when nothing qualifies.
+        Applies EMA50(1h) trend filter: long only above EMA50, short only below.
         """
-        candidates = [
-            r for r in results if not r.blocked and r.confidence_result.tradeable()
-        ]
+        candidates = self._filter_tradeable(results)
         if not candidates:
             logger.info("top_opportunity: no tradeable unblocked results")
             return None
-
-        candidates.sort(key=lambda r: r.confidence_result.dominant_score, reverse=True)
         best = candidates[0]
         logger.info(
             "top_opportunity: %s | direction=%s | score=%.1f | tier=%s",
@@ -187,6 +182,41 @@ class Scanner:
             best.confidence_result.position_tier.value,
         )
         return best
+
+    def tradeable_opportunities(self, results: list[ScanResult]) -> list[ScanResult]:
+        """
+        Return ALL tradeable, unblocked opportunities sorted by score DESC.
+        Allows the orchestrator to fill multiple position slots in one cycle.
+        """
+        return self._filter_tradeable(results)
+
+    def _filter_tradeable(self, results: list[ScanResult]) -> list[ScanResult]:
+        """
+        Shared filter: unblocked + tradeable tier + EMA50(1h) trend confirmation.
+        Returns list sorted by dominant_score DESC.
+        """
+        candidates: list[ScanResult] = []
+        for r in results:
+            if r.blocked or not r.confidence_result.tradeable():
+                continue
+            direction = r.confidence_result.direction
+            # EMA50(1h) trend filter: long only above EMA50, short only below
+            if r.ema50 is not None and r.current_price is not None:
+                if direction == "long" and r.current_price < r.ema50:
+                    logger.debug(
+                        "_filter_tradeable: %s skipped — price %.4f below EMA50(1h) %.4f",
+                        r.symbol, r.current_price, r.ema50,
+                    )
+                    continue
+                if direction == "short" and r.current_price > r.ema50:
+                    logger.debug(
+                        "_filter_tradeable: %s skipped — price %.4f above EMA50(1h) %.4f",
+                        r.symbol, r.current_price, r.ema50,
+                    )
+                    continue
+            candidates.append(r)
+        candidates.sort(key=lambda r: r.confidence_result.dominant_score, reverse=True)
+        return candidates
 
     # ------------------------------------------------------------------
     # Internal per-symbol logic
@@ -239,6 +269,25 @@ class Scanner:
             )
             return None
 
+        # Compute ATR and EMA50 from 1h data for downstream use
+        atr_val: Optional[float] = None
+        ema50_val: Optional[float] = None
+        current_price_val: Optional[float] = None
+        try:
+            df_1h = dfs["1h"]
+            close_1h = df_1h["close"]
+            current_price_val = float(close_1h.iloc[-1])
+            if len(df_1h) >= 14:
+                atr_s = ta.atr(df_1h["high"], df_1h["low"], close_1h, length=14)
+                if atr_s is not None and not atr_s.empty and pd.notna(atr_s.iloc[-1]):
+                    atr_val = float(atr_s.iloc[-1])
+            if len(df_1h) >= 30:
+                ema50_s = ta.ema(close_1h, length=50)
+                if ema50_s is not None and not ema50_s.empty and pd.notna(ema50_s.iloc[-1]):
+                    ema50_val = float(ema50_s.iloc[-1])
+        except Exception:
+            pass
+
         # Step 5: Signal engine
         try:
             bundle: SignalBundle = self._engine.evaluate(symbol, dfs)
@@ -256,6 +305,17 @@ class Scanner:
                 "scan: confidence scoring failed for %s — skipping", symbol, exc_info=True
             )
             return None
+
+        # Step 6b: Log confidence score for visibility
+        logger.info(
+            "scan: %s | dir=%-5s bull=%4.1f bear=%4.1f score=%4.1f tier=%s",
+            symbol,
+            confidence.direction,
+            confidence.bull_score,
+            confidence.bear_score,
+            confidence.dominant_score,
+            confidence.position_tier.value,
+        )
 
         # Step 7: Persist signal to DB
         try:
@@ -322,11 +382,21 @@ class Scanner:
             bundle=bundle,
             blocked=blocked,
             block_reason=block_reason,
+            atr=atr_val,
+            ema50=ema50_val,
+            current_price=current_price_val,
         )
 
     # ------------------------------------------------------------------
     # Market hours
     # ------------------------------------------------------------------
+
+    def any_market_open(self) -> bool:
+        """Return True if at least one instrument in the current universe has an open market."""
+        for instrument in get_universe_snapshot():
+            if self._is_market_open(instrument):
+                return True
+        return False
 
     def _is_market_open(self, instrument: Instrument) -> bool:
         """
@@ -465,16 +535,19 @@ def test_scanner() -> None:
 
     scanner = Scanner(state_manager=mock_state)
 
+    # patch target: __name__ is '__main__' when run directly, 'portfolio.scanner' via pytest
+    _patch_target = f"{__name__}.datetime"
+
     # Patch datetime.utcnow() to return 14:00 UTC on a Monday (weekday=0)
     monday_14 = datetime(2026, 3, 2, 14, 0, 0)   # 2026-03-02 is a Monday
-    with mock.patch("portfolio.scanner.datetime") as mock_dt:
+    with mock.patch(_patch_target) as mock_dt:
         mock_dt.utcnow.return_value = monday_14
         result_open = scanner._is_market_open(spy)
     check("SPY at 14:00 UTC Monday → open", result_open, True)
 
     # 22:00 UTC — after market close
     monday_22 = datetime(2026, 3, 2, 22, 0, 0)
-    with mock.patch("portfolio.scanner.datetime") as mock_dt:
+    with mock.patch(_patch_target) as mock_dt:
         mock_dt.utcnow.return_value = monday_22
         result_closed = scanner._is_market_open(spy)
     check("SPY at 22:00 UTC Monday → closed", result_closed, False)
@@ -482,7 +555,7 @@ def test_scanner() -> None:
     # ── Test 3: Weekend guard ───────────────────────────────────────────────────
 
     saturday_14 = datetime(2026, 3, 7, 14, 0, 0)  # 2026-03-07 is a Saturday
-    with mock.patch("portfolio.scanner.datetime") as mock_dt:
+    with mock.patch(_patch_target) as mock_dt:
         mock_dt.utcnow.return_value = saturday_14
         result_weekend = scanner._is_market_open(eurusd)
     check("EURUSD at 14:00 UTC Saturday → closed (weekend)", result_weekend, False)
@@ -568,7 +641,7 @@ def test_scanner() -> None:
 
     # ── Test 5: scan_all with mocked fetch that raises → returns [] ─────────────
 
-    with mock.patch("portfolio.scanner.fetch_candles", side_effect=RuntimeError("network error")):
+    with mock.patch(f"{__name__}.fetch_candles", side_effect=RuntimeError("network error")):
         scan_results = scanner.scan_all()
 
     check("scan_all with fetch error → empty list", len(scan_results), 0)

@@ -341,6 +341,10 @@ class Orchestrator:
         logger.info("Orchestrator.start(): initialising database")
         init_db(self._database_url)
 
+        restored = self._state.restore_from_db()
+        if restored:
+            logger.info("Orchestrator.start(): restored %d open position(s) from DB", restored)
+
         logger.info("Orchestrator.start(): starting HealthMonitor")
         self._monitor.start()
 
@@ -494,6 +498,17 @@ class Orchestrator:
             self._log_cycle_summary(cycle_start, skipped=True, skip_reason="no scanner")
             return
 
+        # ── Market-hours gate ──────────────────────────────────────────────────
+        # Skip the scan entirely when all markets are closed AND we hold no open
+        # positions (nothing to exit). Saves API calls during off-hours.
+        if not self._state.all_positions() and not self._scanner.any_market_open():
+            logger.debug(
+                "Cycle #%d: all markets closed, no open positions — skipping scan.",
+                self._cycle_count,
+            )
+            self._log_cycle_summary(cycle_start, skipped=True, skip_reason="markets closed")
+            return
+
         try:
             scan_results = self._scanner.scan_all(skip_brokers=down_brokers)
         except Exception:
@@ -519,8 +534,8 @@ class Orchestrator:
         except Exception:
             pass  # never block trading loop for notification errors
 
-        opportunity = self._scanner.top_opportunity(scan_results)
-        if opportunity is None:
+        opportunities = self._scanner.tradeable_opportunities(scan_results)
+        if not opportunities:
             logger.info(
                 "Cycle #%d: no tradeable opportunity found (all below threshold).",
                 self._cycle_count,
@@ -528,8 +543,15 @@ class Orchestrator:
             self._log_cycle_summary(cycle_start, skipped=False)
             return
 
-        # ── Step 6: Risk + order ───────────────────────────────────────────────
-        self._attempt_entry(opportunity)
+        # ── Step 6: Risk + order (fill all available slots) ────────────────────
+        for opportunity in opportunities:
+            if not self._state.can_open_position(opportunity.symbol):
+                logger.debug(
+                    "Cycle #%d: capacity reached — stopping entry loop.",
+                    self._cycle_count,
+                )
+                break
+            self._attempt_entry(opportunity)
 
         # ── Step 7: Summary ────────────────────────────────────────────────────
         self._log_cycle_summary(cycle_start, skipped=False)
@@ -544,9 +566,23 @@ class Orchestrator:
             positions = self._state.all_positions()
             daily_pnl = self._state.daily_pnl()
             equity = self._state.available_cash() + self._state.deployed_capital()
+
+            # Calculate unrealized P&L from current prices
+            unrealized_pnl = 0.0
+            for pos in positions:
+                try:
+                    from data.fetcher import fetch_candles
+                    df = fetch_candles(pos.symbol, "1h")
+                    if df is not None and not df.empty:
+                        current_price = float(df["close"].iloc[-1])
+                        unrealized_pnl += pos.unrealized_pnl(current_price)
+                except Exception:
+                    logger.debug("save_snapshot: could not fetch price for %s", pos.symbol)
+
             self._notifier.notify_daily_summary(
                 open_positions=len(positions),
                 daily_pnl=daily_pnl,
+                unrealized_pnl=round(unrealized_pnl, 2),
                 total_equity=equity,
                 trading_mode=self._trading_mode,
             )
@@ -608,6 +644,32 @@ class Orchestrator:
                         "Exit failed for %s: %s", symbol, result.error
                     )
                 continue  # move on; position may no longer exist in state
+
+            # ── Signal-reversal exit (held ≥1 day) ────────────────────────
+            if held_days >= 1 and self._has_signal_reversal(position):
+                logger.info(
+                    "Exit: %s EMA9 crossed against %s position — closing early "
+                    "(held %d day(s)).",
+                    symbol, position.direction, held_days,
+                )
+                result = self._exec_agent.close_position(
+                    position=position,
+                    reason="signal_exit",
+                )
+                if result.success:
+                    self._record_closed_trade_outcome(position, result)
+                    if result.filled_price is not None:
+                        self._notifier.notify_trade_closed(
+                            symbol=symbol,
+                            direction=position.direction,
+                            entry_price=position.entry_price,
+                            exit_price=result.filled_price,
+                            quantity=position.quantity,
+                            reason="signal_exit",
+                        )
+                else:
+                    logger.error("Signal-exit failed for %s: %s", symbol, result.error)
+                continue
 
     def _record_closed_trade_outcome(
         self,
@@ -725,8 +787,10 @@ class Orchestrator:
                 # For swing entries (held overnight) we let the trade proceed.
                 # Log the warning and continue.
 
-        # ── Get current price ──────────────────────────────────────────────────
-        current_price = self._get_current_price(symbol)
+        # ── Get current price (use cached scan price; fallback to live fetch) ──
+        current_price = getattr(opportunity, "current_price", None)
+        if current_price is None or current_price <= 0:
+            current_price = self._get_current_price(symbol)
         if current_price is None or current_price <= 0:
             logger.warning(
                 "_attempt_entry: %s — could not fetch current price, skip.", symbol
@@ -734,10 +798,12 @@ class Orchestrator:
             return
 
         # ── Guard 6: RiskAgent ────────────────────────────────────────────────
+        atr = getattr(opportunity, "atr", None)
         risk_params = self._risk_agent.compute(
             confidence_result=confidence_result,
             current_price=current_price,
             symbol=symbol,
+            atr=atr,
         )
         if risk_params is None:
             logger.info(
@@ -815,6 +881,34 @@ class Orchestrator:
             )
             return None
 
+    def _has_signal_reversal(self, position: Position) -> bool:
+        """
+        Return True if EMA9 has crossed against the position direction on 1h candles.
+        Used to exit early when the short-term trend flips.
+        Only called after ≥1 day holding to avoid noise from intraday candle jitter.
+        """
+        try:
+            import pandas_ta as ta
+            from data.fetcher import fetch_candles
+            df = fetch_candles(position.symbol, "1h")
+            if df is None or df.empty or len(df) < 21:
+                return False
+            close = df["close"]
+            ema9  = ta.ema(close, length=9)
+            ema21 = ta.ema(close, length=21)
+            if ema9 is None or ema21 is None or ema9.empty or ema21.empty:
+                return False
+            e9  = float(ema9.iloc[-1])
+            e21 = float(ema21.iloc[-1])
+            if position.direction == "long"  and e9 < e21:
+                return True
+            if position.direction == "short" and e9 > e21:
+                return True
+            return False
+        except Exception:
+            logger.debug("_has_signal_reversal: check failed for %s", position.symbol)
+            return False
+
     # ── Cycle summary ─────────────────────────────────────────────────────────
 
     def _log_cycle_summary(
@@ -876,11 +970,12 @@ def test_orchestrator() -> None:
         m.can_open_position.return_value = True
         return m
 
-    # ── Test 1: daily_loss=$16 → tripped ─────────────────────────────────────
-    # Uses default capital ($500): limit = 500 * 0.03 = $15; -16 still triggers.
-    print("\n[Test 1] daily_loss=$16 → CircuitBreaker should trip")
+    # ── Test 1: loss > 3% of capital → tripped ───────────────────────────────
+    daily_limit = settings.bot.total_capital * 0.03
+    over_limit  = -(daily_limit + 1.0)   # always exceeds the limit regardless of capital
+    print(f"\n[Test 1] daily_loss=${abs(over_limit):.2f} (limit=${daily_limit:.2f}) → CircuitBreaker should trip")
     cb1 = CircuitBreaker()
-    mock_state_loss = make_mock_state(daily_pnl_value=-16.0)
+    mock_state_loss = make_mock_state(daily_pnl_value=over_limit)
     tripped, reason = cb1.check(mock_state_loss)
     assert tripped, f"Expected tripped=True, got {tripped}"
     assert "daily loss" in reason.lower(), (
@@ -892,7 +987,8 @@ def test_orchestrator() -> None:
     # ── Test 2: 5 consecutive losses → tripped ────────────────────────────────
     print("\n[Test 2] 5 consecutive losses → CircuitBreaker should trip")
     cb2 = CircuitBreaker()
-    mock_state_ok = make_mock_state(daily_pnl_value=-2.0)  # within daily limit
+    within_limit = -(daily_limit * 0.1)  # 0.3% loss — always within the 3% limit
+    mock_state_ok = make_mock_state(daily_pnl_value=within_limit)
     for _ in range(5):
         cb2.record_loss()
     tripped2, reason2 = cb2.check(mock_state_ok)
@@ -903,10 +999,11 @@ def test_orchestrator() -> None:
     print(f"  PASS: tripped={tripped2}, reason={reason2!r}")
     passed += 1
 
-    # ── Test 3: daily_loss=$5 → not tripped ──────────────────────────────────
-    print("\n[Test 3] daily_loss=$5 → CircuitBreaker should NOT trip")
+    # ── Test 3: loss < 3% of capital → not tripped ───────────────────────────
+    small_loss = -(daily_limit * 0.5)   # 1.5% loss — always within the 3% limit
+    print(f"\n[Test 3] daily_loss=${abs(small_loss):.2f} (< limit ${daily_limit:.2f}) → CircuitBreaker should NOT trip")
     cb3 = CircuitBreaker()
-    mock_state_small_loss = make_mock_state(daily_pnl_value=-5.0)
+    mock_state_small_loss = make_mock_state(daily_pnl_value=small_loss)
     tripped3, reason3 = cb3.check(mock_state_small_loss)
     assert not tripped3, f"Expected tripped=False for small loss, got {tripped3}"
     assert reason3 == "", f"Expected empty reason, got: {reason3!r}"
@@ -939,10 +1036,13 @@ def test_orchestrator() -> None:
     mock_scanner = mock.MagicMock()
     mock_scanner.scan_all.return_value = []         # no results → no entry attempted
     mock_scanner.top_opportunity.return_value = None
+    mock_scanner.tradeable_opportunities.return_value = []
     orch._scanner = mock_scanner
 
     mock_monitor = mock.MagicMock(spec=HealthMonitor)
     mock_health_status = mock.MagicMock()
+    mock_health_status.all_down.return_value = False
+    mock_health_status.down_brokers.return_value = set()
     mock_health_status.any_down.return_value = False
     mock_health_status.ibkr_status.value = "healthy"
     mock_health_status.oanda_status.value = "healthy"
