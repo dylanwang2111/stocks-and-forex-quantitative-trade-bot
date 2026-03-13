@@ -150,11 +150,15 @@ class ExecutionAgent:
                 return result
 
             # ── DB: insert Trade row ────────────────────────────────────────
+            # filled_price is always set on a successful result; fall back to
+            # the target entry price as a safety net so downstream math never
+            # receives None.
+            filled_price: float = result.filled_price or risk_params.entry_price
             db_trade_id = self._insert_trade(
                 symbol=symbol,
                 broker=instrument.broker,
                 direction=direction,
-                filled_price=result.filled_price,
+                filled_price=filled_price,
                 risk_params=risk_params,
                 confidence_result=confidence_result,
                 regime=regime,
@@ -174,7 +178,7 @@ class ExecutionAgent:
                 broker=instrument.broker,
                 direction=direction,
                 quantity=risk_params.quantity,
-                entry_price=result.filled_price,
+                entry_price=filled_price,
                 stop_price=risk_params.stop_price,
                 take_profit_price=risk_params.take_profit_price,
                 confidence=confidence_result.dominant_score,
@@ -968,6 +972,7 @@ def test_execution_agent() -> None:
 
     # ── Test 4: close_position — DB updated, Position removed ───────────────
     spy_pos = state.get_position("SPY")
+    assert spy_pos is not None, "SPY position missing before close test"
     close_result = agent.close_position(position=spy_pos, reason="take_profit")
 
     assert close_result.success, f"Close SPY failed: {close_result.error}"

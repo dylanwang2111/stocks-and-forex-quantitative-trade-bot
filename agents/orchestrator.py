@@ -368,7 +368,7 @@ class Orchestrator:
 
         self._scheduler.add_job(
             func=self.save_snapshot,
-            trigger=IntervalTrigger(minutes=self.SNAPSHOT_INTERVAL_MINUTES),
+            trigger=CronTrigger(minute=0),   # top of every hour, restart-stable
             id="save_snapshot",
             name="Portfolio snapshot",
             replace_existing=True,
@@ -567,17 +567,27 @@ class Orchestrator:
             daily_pnl = self._state.daily_pnl()
             equity = self._state.available_cash() + self._state.deployed_capital()
 
-            # Calculate unrealized P&L from current prices
+            # Calculate unrealized P&L from current prices.
+            # Use cache so we reuse prices already fetched in the scan cycle
+            # (avoids rate-limit failures at snapshot time).
             unrealized_pnl = 0.0
+            from data.fetcher import fetch_candles
             for pos in positions:
                 try:
-                    from data.fetcher import fetch_candles
-                    df = fetch_candles(pos.symbol, "1h")
+                    df = fetch_candles(pos.symbol, "1h", use_cache=True)
                     if df is not None and not df.empty:
                         current_price = float(df["close"].iloc[-1])
                         unrealized_pnl += pos.unrealized_pnl(current_price)
-                except Exception:
-                    logger.debug("save_snapshot: could not fetch price for %s", pos.symbol)
+                    else:
+                        logger.warning(
+                            "save_snapshot: empty price data for %s — unrealized P&L excluded",
+                            pos.symbol,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "save_snapshot: could not fetch price for %s: %s — unrealized P&L excluded",
+                        pos.symbol, exc,
+                    )
 
             self._notifier.notify_daily_summary(
                 open_positions=len(positions),
