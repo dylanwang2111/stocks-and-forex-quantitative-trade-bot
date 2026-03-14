@@ -31,6 +31,9 @@ _SYMBOL_MAP: dict[str, str] = {
     "AUDUSD": "AUDUSD=X",
     "USDCAD": "CAD=X",
     "USDCHF": "CHF=X",
+    # Crypto
+    "BTCUSD": "BTC-USD",
+    "ETHUSD": "ETH-USD",
     # Stocks / ETFs — yfinance uses the same ticker, listed explicitly for clarity
     "SPY":    "SPY",
     "QQQ":    "QQQ",
@@ -109,14 +112,14 @@ _RETRY_DELAYS = (10, 30, 60)  # seconds between retries on rate-limit
 
 def _is_forex(symbol: str) -> bool:
     """
-    Return True if symbol is a forex pair.
+    Return True if symbol should be routed via OANDA (forex or crypto).
     Checks UNIVERSE_BY_SYMBOL first; falls back to 6-char all-alpha heuristic.
     """
     try:
         from portfolio.watchlist import UNIVERSE_BY_SYMBOL
         inst = UNIVERSE_BY_SYMBOL.get(symbol.upper())
         if inst is not None:
-            return inst.asset_type == "forex"
+            return inst.asset_type in ("forex", "crypto")
     except Exception:
         pass
     sym = symbol.upper().replace("/", "")

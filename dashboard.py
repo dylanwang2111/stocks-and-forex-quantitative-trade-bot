@@ -56,6 +56,23 @@ def fetch_open_positions() -> list[Trade]:
         return []
 
 
+def fetch_stop_tp_map() -> dict[str, dict]:
+    """Return {symbol: {stop_price, take_profit_price}} from latest snapshot."""
+    try:
+        session = get_session(settings.bot.database_url)
+        snap = (
+            session.query(PortfolioSnapshot)
+            .order_by(PortfolioSnapshot.timestamp.desc())
+            .first()
+        )
+        session.close()
+        if snap and snap.positions_detail:
+            return {d["symbol"]: d for d in snap.positions_detail if "symbol" in d}
+    except Exception:
+        pass
+    return {}
+
+
 def fetch_recent_signals(limit: int = 20) -> list[SignalLog]:
     try:
         session = get_session(settings.bot.database_url)
@@ -258,6 +275,8 @@ if page.startswith("1"):
     st.divider()
     st.subheader("Open Positions")
     if open_positions:
+        stop_tp = fetch_stop_tp_map()
+        swing_days = settings.bot.swing_holding_days
         open_data = []
         for t in open_positions:
             current_price = None
@@ -273,17 +292,143 @@ if page.startswith("1"):
                         unreal = round((t.entry_price - current_price) * t.quantity, 2)
             except Exception:
                 pass
+
+            detail          = stop_tp.get(t.symbol, {})
+            stop            = detail.get("stop_price")
+            tp              = detail.get("take_profit_price")
+            partial_done    = detail.get("partial_exit_done", False)
+
+            # Phase — derived from live price (more accurate than stale snapshot streak)
+            at_tp_now = False
+            if current_price and tp:
+                if t.direction == "long" and current_price >= tp:
+                    at_tp_now = True
+                elif t.direction == "short" and current_price <= tp:
+                    at_tp_now = True
+
+            in_phase2 = partial_done or at_tp_now
+            if partial_done:
+                phase_label = "2 — trailing"
+            elif at_tp_now:
+                phase_label = "2 — past TP"
+            else:
+                phase_label = "1"
+
+            # Days held / days remaining
+            days_held = (datetime.now(UTC).replace(tzinfo=None) - t.entry_time).days if t.entry_time else None
+            days_left = (swing_days - days_held) if days_held is not None else None
+
+            # Distance from CURRENT price to stop/TP (positive = price needs to move that far)
+            dist_stop = dist_tp = None
+            if stop and current_price:
+                if t.direction == "long":
+                    dist_stop = round((current_price - stop) / current_price * 100, 2)
+                else:
+                    dist_stop = round((stop - current_price) / current_price * 100, 2)
+            if tp and current_price:
+                if t.direction == "long":
+                    dist_tp = round((tp - current_price) / current_price * 100, 2)
+                else:
+                    dist_tp = round((current_price - tp) / current_price * 100, 2)
+
+            # TP progress % — NOT capped at 100; >100 means we're in Phase 2 territory
+            tp_progress = None
+            if current_price and tp and t.entry_price:
+                total_range = abs(tp - t.entry_price)
+                if total_range > 0:
+                    moved = (
+                        (current_price - t.entry_price)
+                        if t.direction == "long"
+                        else (t.entry_price - current_price)
+                    )
+                    tp_progress = round(moved / total_range * 100, 1)
+
             open_data.append({
-                "symbol":         t.symbol,
-                "direction":      t.direction,
-                "tier":           t.position_tier,
-                "qty":            t.quantity,
-                "entry_price":    t.entry_price,
-                "current_price":  current_price,
-                "unrealized_pnl": unreal,
-                "entry_time":     t.entry_time,
+                "symbol":       t.symbol,
+                "dir":          t.direction,
+                "phase":        phase_label,
+                "partial":      "✓" if partial_done else "",
+                "entry":        t.entry_price,
+                "current":      current_price,
+                "stop":         round(stop, 4) if stop else None,
+                "target":       round(tp, 4) if tp else None,
+                "to_stop%":     dist_stop,
+                "to_target%":   dist_tp,
+                "TP_prog%":     tp_progress,
+                "unreal_pnl$":  unreal,
+                "qty":          t.quantity,
+                "days_held":    days_held,
+                "days_left":    days_left,
+                "confidence":   round(t.confidence, 1),
             })
-        st.dataframe(pd.DataFrame(open_data), width="stretch")
+
+        df_open = pd.DataFrame(open_data)
+
+        def _color_open(row):
+            styles = [""] * len(row)
+            cols = list(row.index)
+
+            def idx(name):
+                return cols.index(name) if name in cols else None
+
+            # unreal_pnl$: green/red
+            i = idx("unreal_pnl$")
+            if i is not None and row["unreal_pnl$"] is not None:
+                try:
+                    v = float(row["unreal_pnl$"])
+                    styles[i] = (
+                        "color: #155724; font-weight: bold" if v > 0
+                        else "color: #721c24; font-weight: bold" if v < 0
+                        else ""
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+            # TP_prog%: green gradient; orange/red if negative
+            i = idx("TP_prog%")
+            if i is not None and row["TP_prog%"] is not None:
+                try:
+                    p = float(row["TP_prog%"])
+                    if p >= 100:
+                        styles[i] = "background-color: #0a3622; color: #75b798; font-weight: bold"
+                    elif p >= 75:
+                        styles[i] = "background-color: #155724; color: white"
+                    elif p >= 40:
+                        styles[i] = "background-color: #d4edda; color: #155724"
+                    elif p < 0:
+                        styles[i] = "color: #721c24"
+                except (TypeError, ValueError):
+                    pass
+
+            # days_left: red if ≤1
+            i = idx("days_left")
+            if i is not None and row["days_left"] is not None:
+                try:
+                    if int(row["days_left"]) <= 1:
+                        styles[i] = "color: #721c24; font-weight: bold"
+                except (TypeError, ValueError):
+                    pass
+
+            # to_stop%: red if < 0.5% (very close to stop)
+            i = idx("to_stop%")
+            if i is not None and row["to_stop%"] is not None:
+                try:
+                    if float(row["to_stop%"]) < 0.5:
+                        styles[i] = "color: #721c24; font-weight: bold"
+                except (TypeError, ValueError):
+                    pass
+
+            return styles
+
+        styled_open = df_open.style.apply(_color_open, axis=1)
+        st.dataframe(styled_open, width="stretch")
+
+        st.caption(
+            "**phase**: 1 = hard stop active | 2 — past TP = price past target, trailing activating | "
+            "2 — trailing = trailing stop live  |  **partial ✓** = 50% closed at TP confirmation  |  "
+            "**to_stop%** / **to_target%** = distance from current price (positive = not yet hit)  |  "
+            "**TP_prog%** > 100 = price past original target"
+        )
     else:
         st.info("No open positions")
 

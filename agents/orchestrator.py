@@ -157,7 +157,7 @@ class Orchestrator:
 
     SCAN_INTERVAL_MINUTES     = 15
     SNAPSHOT_INTERVAL_MINUTES = 60
-    SWING_HOLDING_DAYS        = 3   # default holding-period for exit checks
+    SWING_HOLDING_DAYS        = 7   # fallback only; overridden by settings at init
 
     def __init__(
         self,
@@ -166,6 +166,7 @@ class Orchestrator:
     ) -> None:
         self._database_url: str = database_url or settings.bot.database_url
         self._trading_mode: str = trading_mode or settings.bot.trading_mode
+        self._swing_holding_days: int = settings.bot.swing_holding_days
 
         logger.info(
             "Orchestrator initialising | mode=%s db=%s",
@@ -546,9 +547,12 @@ class Orchestrator:
         # ── Step 6: Risk + order (fill all available slots) ────────────────────
         for opportunity in opportunities:
             if not self._state.can_open_position(opportunity.symbol):
-                logger.debug(
-                    "Cycle #%d: capacity reached — stopping entry loop.",
+                logger.info(
+                    "Cycle #%d: capacity reached (open=%d, max=%d) — skipping %s.",
                     self._cycle_count,
+                    len(self._state.all_positions()),
+                    self._state._max_positions,
+                    opportunity.symbol,
                 )
                 break
             self._attempt_entry(opportunity)
@@ -605,12 +609,26 @@ class Orchestrator:
 
     def _check_exits(self) -> None:
         """
-        Evaluate every open position for time-based exit criteria.
+        Exit logic — two phases per position (checked every 15-min cycle):
 
-        Time-based exit: close positions held longer than SWING_HOLDING_DAYS.
-        Price-based exits (stop/TP) are handled at the broker level via bracket
-        orders, so we only need to handle the time gate here.
-        In paper mode, skip price-based checks (no live quote available).
+        Phase 1  price has NOT yet exceeded TP (TP_progress < 100%):
+          • Hard stop-loss at stop_price  (fills at stop price)
+          • Hard take-profit at take_profit_price  (fills at TP price)
+
+        Phase 2  price has blown past TP (TP_progress >= 100%):
+          • Trailing stop at 2.1×ATR ratchets behind price — lets winner run
+          • Hard TP no longer used as exit; stop_price becomes the trailing stop
+          • stop_price only ever moves in the profitable direction
+
+        Backstops (both phases):
+          • Time exit  — held >= swing_holding_days
+          • Signal reversal — EMA9 crosses against direction (held >= 1 day)
+
+        NOTE (live mode): when entering Phase 2 the TP bracket order at the
+        broker is still active. The orchestrator will close the position via
+        close_position() when the trailing stop is hit, cancelling all brackets.
+        If the broker's TP fires first, the position is gone and the orchestrator
+        detects this on the next reconnect sync — both paths are safe.
         """
         positions = self._state.all_positions()
         now_utc = datetime.utcnow()
@@ -618,27 +636,116 @@ class Orchestrator:
         for position in positions:
             symbol = position.symbol
             held_days = (now_utc - position.entry_time).days
-            logger.debug(
-                "Checking exit for %s: held %d day(s) "
-                "(entry=%s dir=%s tier=%s)",
-                symbol,
-                held_days,
-                position.entry_time.strftime("%Y-%m-%d"),
-                position.direction,
-                position.position_tier,
-            )
+
+            # ── Fetch current price once (used for all checks below) ────────
+            current_price: float | None = None
+            try:
+                from data.fetcher import fetch_candles
+                df = fetch_candles(symbol, "1h")
+                if df is not None and not df.empty:
+                    current_price = float(df["close"].iloc[-1])
+            except Exception:
+                pass
+
+            # ── Price-based exit checks ─────────────────────────────────────
+            if current_price is not None:
+                tp   = position.take_profit_price
+                stop = position.stop_price
+
+                # ── TP breach streak (confirmation guard) ───────────────────
+                # Phase 2 requires 2 consecutive cycles with price past TP.
+                # This prevents a single-candle spike from immediately activating
+                # the trailing stop.
+                at_tp = (
+                    tp is not None and (
+                        (position.direction == "long"  and current_price >= tp) or
+                        (position.direction == "short" and current_price <= tp)
+                    )
+                )
+                if at_tp:
+                    position.tp_breach_streak += 1
+                else:
+                    position.tp_breach_streak = 0
+
+                # Once partial exit is done we're permanently in Phase 2
+                # regardless of where price is relative to TP.
+                in_phase2 = position.tp_breach_streak >= 2 or position.partial_exit_done
+
+                hit_reason: str | None = None
+                fill: float | None = None
+
+                if in_phase2:
+                    # ── Partial exit: first cycle entering Phase 2 ──────────
+                    if not position.partial_exit_done:
+                        partial = self._exec_agent.partial_close_position(
+                            position=position,
+                            close_fraction=0.5,
+                            fill_price=current_price,
+                        )
+                        if partial.success:
+                            logger.info(
+                                "Phase-2 entry: %s %s — closed 50%% @ %.4f (TP confirmed x%d)",
+                                symbol, position.direction, current_price,
+                                position.tp_breach_streak,
+                            )
+                        else:
+                            logger.error(
+                                "Partial close failed for %s: %s", symbol, partial.error
+                            )
+
+                    # ── Trailing stop on remaining 50% ──────────────────────
+                    self._update_trailing_stop(position, current_price)
+                    stop = position.stop_price  # re-read after potential update
+                    if position.direction == "long" and current_price <= stop:
+                        hit_reason, fill = "trailing_stop", stop
+                    elif position.direction == "short" and current_price >= stop:
+                        hit_reason, fill = "trailing_stop", stop
+
+                else:
+                    # Phase 1: hard stop only.
+                    # TP is now purely a phase-trigger, not an exit trigger —
+                    # the position stays open until the trailing stop fires.
+                    if position.direction == "long":
+                        if stop and current_price <= stop:
+                            hit_reason, fill = "stop_loss", stop
+                    else:
+                        if stop and current_price >= stop:
+                            hit_reason, fill = "stop_loss", stop
+
+                if hit_reason:
+                    logger.info(
+                        "Exit: %s %s — %s hit (current=%.4f fill=%.4f).",
+                        symbol, position.direction, hit_reason, current_price, fill,
+                    )
+                    result = self._exec_agent.close_position(
+                        position=position,
+                        reason=hit_reason,
+                        fill_price=fill,
+                    )
+                    if result.success:
+                        self._record_closed_trade_outcome(position, result)
+                        self._notifier.notify_trade_closed(
+                            symbol=symbol,
+                            direction=position.direction,
+                            entry_price=position.entry_price,
+                            exit_price=result.filled_price,
+                            quantity=position.quantity,
+                            reason=hit_reason,
+                        )
+                    else:
+                        logger.error("Exit failed for %s: %s", symbol, result.error)
+                    continue
 
             # ── Time-based exit ────────────────────────────────────────────
-            if held_days >= self.SWING_HOLDING_DAYS:
+            if held_days >= self._swing_holding_days:
                 logger.info(
                     "Exit: %s held %d days (>= %d) — closing (time-based).",
-                    symbol,
-                    held_days,
-                    self.SWING_HOLDING_DAYS,
+                    symbol, held_days, self._swing_holding_days,
                 )
                 result = self._exec_agent.close_position(
                     position=position,
                     reason="time_exit",
+                    fill_price=current_price,
                 )
                 if result.success:
                     self._record_closed_trade_outcome(position, result)
@@ -652,10 +759,8 @@ class Orchestrator:
                             reason="time_exit",
                         )
                 else:
-                    logger.error(
-                        "Exit failed for %s: %s", symbol, result.error
-                    )
-                continue  # move on; position may no longer exist in state
+                    logger.error("Exit failed for %s: %s", symbol, result.error)
+                continue
 
             # ── Signal-reversal exit (held ≥1 day) ────────────────────────
             if held_days >= 1 and self._has_signal_reversal(position):
@@ -667,6 +772,7 @@ class Orchestrator:
                 result = self._exec_agent.close_position(
                     position=position,
                     reason="signal_exit",
+                    fill_price=current_price,
                 )
                 if result.success:
                     self._record_closed_trade_outcome(position, result)
@@ -761,6 +867,11 @@ class Orchestrator:
             asset_type = get_instrument(symbol).asset_type
         except (KeyError, ImportError):
             asset_type = "stock"  # conservative default
+
+        # ── Guard: crypto long-only ────────────────────────────────────────────
+        if asset_type == "crypto" and confidence_result.direction == "short":
+            logger.debug("_attempt_entry: %s short skipped — crypto is long-only", symbol)
+            return
 
         blocked, block_reason = self._event_guard.is_blocked(symbol, asset_type)
         if blocked:
@@ -920,6 +1031,50 @@ class Orchestrator:
         except Exception:
             logger.debug("_has_signal_reversal: check failed for %s", position.symbol)
             return False
+
+    def _update_trailing_stop(self, position: Position, current_price: float) -> None:
+        """
+        Phase-2 trailing stop: ratchets stop behind price at 2.1×ATR(14, 1h).
+          long:  new_stop = max(current_stop, current_price - 2.1×ATR)
+          short: new_stop = min(current_stop, current_price + 2.1×ATR)
+        Only called after TP has been breached — no entry-threshold guard needed.
+        Falls back to 2% of price when ATR is unavailable.
+        """
+        try:
+            import pandas_ta as ta
+            from data.fetcher import fetch_candles
+            df = fetch_candles(position.symbol, "1h")
+            if df is None or df.empty or len(df) < 15:
+                return
+            atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
+            if atr_series is None or atr_series.empty:
+                return
+            atr = float(atr_series.iloc[-1])
+            if not atr or atr <= 0:
+                atr = current_price * 0.02  # 2% fallback
+        except Exception:
+            logger.debug("_update_trailing_stop: ATR fetch failed for %s", position.symbol)
+            return
+
+        trail_dist = 2.1 * atr
+        old_stop = position.stop_price
+
+        if position.direction == "long":
+            candidate = current_price - trail_dist
+            if candidate > old_stop:
+                position.stop_price = candidate
+                logger.info(
+                    "Trailing stop: %s long %.4f → %.4f (price=%.4f atr=%.4f)",
+                    position.symbol, old_stop, candidate, current_price, atr,
+                )
+        else:  # short
+            candidate = current_price + trail_dist
+            if candidate < old_stop:
+                position.stop_price = candidate
+                logger.info(
+                    "Trailing stop: %s short %.4f → %.4f (price=%.4f atr=%.4f)",
+                    position.symbol, old_stop, candidate, current_price, atr,
+                )
 
     # ── Cycle summary ─────────────────────────────────────────────────────────
 

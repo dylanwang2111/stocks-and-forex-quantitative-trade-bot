@@ -130,13 +130,16 @@ class TelegramNotifier:
         self.send(msg)
 
     def notify_portfolio_updated(self, instruments: list) -> None:
-        stocks = [i.symbol for i in instruments if i.asset_type == "stock"]
-        forex  = [i.symbol for i in instruments if i.asset_type == "forex"]
-        lines  = ["🔄 PORTFOLIO UPDATED"]
+        stocks  = [i.symbol for i in instruments if i.asset_type == "stock"]
+        forex   = [i.symbol for i in instruments if i.asset_type == "forex"]
+        crypto  = [i.symbol for i in instruments if i.asset_type == "crypto"]
+        lines   = ["🔄 PORTFOLIO UPDATED"]
         if stocks:
             lines.append(f"Stocks ({len(stocks)}): {', '.join(stocks)}")
         if forex:
             lines.append(f"Forex  ({len(forex)}): {', '.join(forex)}")
+        if crypto:
+            lines.append(f"Crypto ({len(crypto)}): {', '.join(crypto)}")
         self.send("\n".join(lines))
 
     def notify_pdt_warning(self, used: int, limit: int) -> None:

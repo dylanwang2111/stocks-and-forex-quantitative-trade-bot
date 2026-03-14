@@ -106,6 +106,28 @@ UNIVERSE: list[Instrument] = [
         correlated_with=["EURUSD"],
         notes="Secondary forex. Strong trends only. Never hold with EURUSD.",
     ),
+    Instrument(
+        symbol="BTCUSD",
+        broker="oanda",
+        asset_type="crypto",
+        yf_symbol="BTC-USD",
+        active_hours_utc="00:00–23:59",   # 24h weekdays (OANDA closes weekends)
+        slippage_pct=0.001,
+        min_position_usd=10.0,
+        correlated_with=[],
+        notes="Bitcoin / USD — long only via OANDA",
+    ),
+    Instrument(
+        symbol="ETHUSD",
+        broker="oanda",
+        asset_type="crypto",
+        yf_symbol="ETH-USD",
+        active_hours_utc="00:00–23:59",
+        slippage_pct=0.001,
+        min_position_usd=10.0,
+        correlated_with=["BTCUSD"],
+        notes="Ethereum / USD — long only via OANDA",
+    ),
 ]
 
 # ── Candidate pool for portfolio selection ─────────────────────────────────────
@@ -172,7 +194,7 @@ CANDIDATE_POOL: list[Instrument] = [
     # ── Energy (oil / petroleum / integrated) ───────────────────────────────────
     Instrument(symbol="XOM",  broker="ibkr", asset_type="stock", yf_symbol="XOM",
                active_hours_utc="13:30–20:00", slippage_pct=0.0006, min_position_usd=10.0,
-               correlated_with=["CVX", "OXY", "COP", "XLE"], notes="ExxonMobil. Integrated major."),
+               correlated_with=["CVX", "OXY", "COP"], notes="ExxonMobil. Integrated major."),
     Instrument(symbol="CVX",  broker="ibkr", asset_type="stock", yf_symbol="CVX",
                active_hours_utc="13:30–20:00", slippage_pct=0.0007, min_position_usd=10.0,
                correlated_with=["XOM", "OXY", "COP", "XLE"], notes="Chevron. Integrated major."),
@@ -196,7 +218,7 @@ CANDIDATE_POOL: list[Instrument] = [
                correlated_with=["MPC", "XLE"], notes="Valero Energy. Largest US refiner."),
     Instrument(symbol="XLE",  broker="ibkr", asset_type="stock", yf_symbol="XLE",
                active_hours_utc="13:30–20:00", slippage_pct=0.0005, min_position_usd=10.0,
-               correlated_with=["XOM", "CVX", "OXY", "COP", "SLB", "HAL", "MPC", "VLO"],
+               correlated_with=["CVX", "OXY", "COP", "SLB", "HAL", "MPC", "VLO"],
                notes="SPDR Energy Select Sector ETF. Diversified oil/gas exposure."),
     # ── Gold & Precious Metals ──────────────────────────────────────────────────
     Instrument(symbol="GOLD",  broker="ibkr", asset_type="stock", yf_symbol="GOLD",
@@ -241,6 +263,10 @@ CANDIDATE_POOL: list[Instrument] = [
     Instrument(symbol="USDCHF", broker="oanda", asset_type="forex", yf_symbol="CHF=X",
                active_hours_utc="07:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
                correlated_with=[], notes="USD/CHF. Safe haven. European session."),
+    # ── Crypto ──────────────────────────────────────────────────────────────────
+    Instrument(symbol="BTCUSD", broker="oanda", asset_type="crypto", yf_symbol="BTC-USD",
+               active_hours_utc="00:00–23:59", slippage_pct=0.001, min_position_usd=10.0,
+               correlated_with=["ETHUSD"], notes="Bitcoin / USD via OANDA. 24h weekdays."),
 ]
 
 # ── Quick-access helpers ───────────────────────────────────────────────────────

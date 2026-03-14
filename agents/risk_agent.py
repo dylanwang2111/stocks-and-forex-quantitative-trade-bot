@@ -30,8 +30,8 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 # ATR-based stop/TP multipliers (matching backtest parameters)
-_ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 1.5}
-_ATR_TP_MULT: dict[str, float] = {"stock": 4.0, "forex": 3.0}
+_ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 1.5, "crypto": 2.0}
+_ATR_TP_MULT: dict[str, float] = {"stock": 4.0, "forex": 4.0, "crypto": 4.0}
 _TARGET_ATR_PCT = 0.02   # target 2% ATR exposure per position (for vol scaling)
 
 
@@ -266,7 +266,9 @@ class RiskAgent:
         """
         if asset_type == "forex":
             return float(round(qty))
-        # stocks (and any other asset type)
+        if asset_type == "crypto":
+            return round(qty, 4)
+        # stocks
         return round(qty, 4)
 
     @staticmethod

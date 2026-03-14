@@ -243,6 +243,8 @@ def _rss_symbol(symbol: str) -> str:
         "AUDUSD": "AUDUSD=X",
         "USDCAD": "CAD=X",
         "USDCHF": "CHF=X",
+        "BTCUSD": "BTC-USD",
+        "ETHUSD": "ETH-USD",
     }
     return mapping.get(symbol, symbol)
 

@@ -22,6 +22,7 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 
+from config.settings import settings
 from data.fetcher import _SYMBOL_MAP, fetch_candles
 from portfolio.watchlist import CANDIDATE_POOL, Instrument, set_active_universe
 from agents.portfolio_agent import MacroContext, _SECTOR, _fetch_macro_context_shared
@@ -52,8 +53,8 @@ class PreScreenAgent:
     Macro context is fetched once and shared across all instruments.
     """
 
-    MAX_STOCKS: int = 4
-    MAX_FOREX: int  = 2
+    MAX_STOCKS: int = settings.bot.max_stocks
+    MAX_FOREX: int  = settings.bot.max_forex
     MIN_BARS: int   = 20
 
     def _bulk_fetch(self) -> dict[str, pd.DataFrame]:

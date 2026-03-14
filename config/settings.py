@@ -104,11 +104,20 @@ class BotConfig:
     risk_per_trade: float = field(
         default_factory=lambda: float(os.getenv("RISK_PER_TRADE", "0.01"))
     )
+    max_stocks: int = field(
+        default_factory=lambda: int(os.getenv("MAX_STOCKS", "6"))
+    )
+    max_forex: int = field(
+        default_factory=lambda: int(os.getenv("MAX_FOREX", "2"))
+    )
     database_url: str = field(
         default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///trade_bot.db")
     )
     log_level: str = field(
         default_factory=lambda: os.getenv("LOG_LEVEL", "INFO")
+    )
+    swing_holding_days: int = field(
+        default_factory=lambda: int(os.getenv("SWING_HOLDING_DAYS", "7"))
     )
 
     @property

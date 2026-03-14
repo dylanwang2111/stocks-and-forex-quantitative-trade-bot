@@ -39,6 +39,10 @@ class Position:
     entry_time: datetime
     db_trade_id: int
 
+    # Exit state — persisted in PortfolioSnapshot.positions_detail
+    tp_breach_streak: int = 0      # consecutive cycles price has been past TP
+    partial_exit_done: bool = False # True once 50% has been closed at TP confirmation
+
     # ------------------------------------------------------------------
     # Computed properties
     # ------------------------------------------------------------------
@@ -258,6 +262,63 @@ class PortfolioStateManager:
         with self._lock:
             self._positions.pop(symbol, None)
 
+    def partial_close_position(
+        self,
+        symbol: str,
+        close_fraction: float,
+        exit_price: float,
+        exit_time: datetime,
+    ) -> float:
+        """Close *close_fraction* (0 < f < 1) of a position in-place.
+
+        Reduces position.quantity, marks partial_exit_done=True, updates the
+        Trade row's quantity, and returns the realised P&L for the closed slice.
+        Does NOT remove the position from memory.
+        """
+        with self._lock:
+            position = self._positions.get(symbol)
+            if position is None:
+                raise KeyError(f"partial_close_position: no open position for '{symbol}'")
+            close_qty  = position.quantity * close_fraction
+            remain_qty = position.quantity - close_qty
+
+        # P&L for the closed slice
+        if position.direction == "long":
+            pnl_usd = (exit_price - position.entry_price) * close_qty
+        else:
+            pnl_usd = (position.entry_price - exit_price) * close_qty
+
+        # Persist reduced quantity to Trade row
+        session = get_session(self._database_url)
+        try:
+            trade = session.get(Trade, position.db_trade_id)
+            if trade is not None:
+                trade.quantity = round(remain_qty, 8)
+                session.commit()
+            else:
+                logger.warning(
+                    "partial_close_position: Trade id=%d not found for %s",
+                    position.db_trade_id, symbol,
+                )
+        except Exception:
+            session.rollback()
+            logger.exception("partial_close_position: DB update failed for %s", symbol)
+            raise
+        finally:
+            session.close()
+
+        # Update in-memory position
+        with self._lock:
+            position.quantity = remain_qty
+            position.partial_exit_done = True
+
+        logger.info(
+            "Partial close: %s %s closed %.4f (%.0f%%) @ %.4f  pnl=%.2f  remaining=%.4f",
+            symbol, position.direction, close_qty, close_fraction * 100,
+            exit_price, pnl_usd, remain_qty,
+        )
+        return pnl_usd
+
     def restore_from_db(self) -> int:
         """Reload open positions from DB into memory on startup.
 
@@ -307,6 +368,8 @@ class PortfolioStateManager:
                     position_tier=trade.position_tier,
                     entry_time=trade.entry_time,
                     db_trade_id=trade.id,
+                    tp_breach_streak=detail.get("tp_breach_streak", 0),
+                    partial_exit_done=detail.get("partial_exit_done", False),
                 )
                 with self._lock:
                     self._positions[trade.symbol] = pos
@@ -413,6 +476,8 @@ class PortfolioStateManager:
                     "entry_time": p.entry_time.isoformat(),
                     "db_trade_id": p.db_trade_id,
                     "cost_basis": round(p.cost_basis(), 4),
+                    "tp_breach_streak": p.tp_breach_streak,
+                    "partial_exit_done": p.partial_exit_done,
                 }
                 for p in self._positions.values()
             ]

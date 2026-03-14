@@ -29,6 +29,7 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 
+from config.settings import settings
 from data.fetcher import _SYMBOL_MAP, fetch_candles
 from portfolio.watchlist import CANDIDATE_POOL, Instrument, set_active_universe
 
@@ -128,8 +129,8 @@ class PortfolioAgent:
       Broad ETFs:    +0.5 if gold or oil uptrend (diversification value)
     """
 
-    MAX_STOCKS: int = 8
-    MAX_FOREX: int  = 2
+    MAX_STOCKS: int = settings.bot.max_stocks
+    MAX_FOREX: int  = settings.bot.max_forex
     MIN_BARS: int   = 20
     MAX_PER_SECTOR: int = 2   # max stocks from any single sector
 

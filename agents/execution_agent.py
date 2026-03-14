@@ -221,6 +221,7 @@ class ExecutionAgent:
         self,
         position: Position,
         reason: str,
+        fill_price: float | None = None,
     ) -> OrderResult:
         """
         Close an existing position via the appropriate broker.
@@ -237,9 +238,9 @@ class ExecutionAgent:
             instrument = get_instrument(symbol)
 
             if instrument.asset_type == "stock":
-                result = self._close_ibkr_position(position, reason)
+                result = self._close_ibkr_position(position, reason, fill_price)
             else:
-                result = self._close_oanda_position(position, reason)
+                result = self._close_oanda_position(position, reason, fill_price)
 
             if not result.success:
                 self._log_event(
@@ -281,6 +282,213 @@ class ExecutionAgent:
                 success=False, order_id=None,
                 filled_price=None, error=error,
                 broker=position.broker,
+            )
+
+    def partial_close_position(
+        self,
+        position: Position,
+        close_fraction: float,
+        fill_price: float | None = None,
+    ) -> OrderResult:
+        """Close *close_fraction* (e.g. 0.5) of a position.
+
+        Routes to the appropriate broker, then calls
+        state_manager.partial_close_position() to reduce in-memory quantity
+        and update the Trade row.  Returns the OrderResult of the broker leg.
+
+        Never raises.
+        """
+        symbol = position.symbol
+        try:
+            instrument = get_instrument(symbol)
+
+            if instrument.asset_type == "stock":
+                result = self._partial_close_ibkr(position, close_fraction, fill_price)
+            else:
+                result = self._partial_close_oanda(position, close_fraction, fill_price)
+
+            if not result.success:
+                self._log_event(
+                    event_type="partial_close_error",
+                    symbol=symbol,
+                    description=result.error or "Partial close failed",
+                    metadata={"fraction": close_fraction, "broker": result.broker},
+                )
+                return result
+
+            exit_price = result.filled_price or position.entry_price
+            pnl = self._state.partial_close_position(
+                symbol=symbol,
+                close_fraction=close_fraction,
+                exit_price=exit_price,
+                exit_time=datetime.utcnow(),
+            )
+            self._log_event(
+                event_type="partial_close",
+                symbol=symbol,
+                description=(
+                    f"Partial close {int(close_fraction * 100)}% @ {exit_price:.4f} "
+                    f"pnl={pnl:.2f}"
+                ),
+                metadata={"fraction": close_fraction, "exit_price": exit_price, "pnl_usd": round(pnl, 4)},
+            )
+            logger.info(
+                "Partial close | %s %s %.0f%% fill=%.4f pnl=%.2f order_id=%s",
+                symbol, position.direction, close_fraction * 100,
+                exit_price, pnl, result.order_id,
+            )
+            return result
+
+        except Exception as exc:
+            error = f"Unexpected error in partial_close_position for {symbol}: {exc}"
+            logger.exception("partial_close_position: %s", error)
+            return OrderResult(
+                success=False, order_id=None,
+                filled_price=None, error=error,
+                broker=position.broker,
+            )
+
+    # ------------------------------------------------------------------
+    # IBKR partial close
+    # ------------------------------------------------------------------
+
+    def _partial_close_ibkr(
+        self,
+        position: Position,
+        close_fraction: float,
+        fill_price: float | None = None,
+    ) -> OrderResult:
+        """Close *close_fraction* of an IBKR stock position."""
+        is_paper = (
+            settings.bot.trading_mode != "live"
+            or not settings.ibkr.enabled
+        )
+        if not is_paper:
+            try:
+                from ib_insync import IB, Stock, MarketOrder  # noqa: F401
+            except ImportError:
+                is_paper = True
+
+        close_qty = position.quantity * close_fraction
+        paper_fill = fill_price if fill_price is not None else position.entry_price
+
+        if is_paper:
+            order_id = f"PAPER-IBKR-PARTIAL-{position.symbol}-{_ts()}"
+            logger.info(
+                "PAPER PARTIAL CLOSE: %s %s qty=%.4f fill=%.4f",
+                position.symbol, position.direction, close_qty, paper_fill,
+            )
+            return OrderResult(
+                success=True, order_id=order_id,
+                filled_price=paper_fill, error=None, broker="ibkr",
+            )
+
+        try:
+            from ib_insync import IB, Stock, MarketOrder
+
+            ib = IB()
+            ib.connect(
+                host=settings.ibkr.host,
+                port=settings.ibkr.port,
+                clientId=settings.ibkr.client_id,
+            )
+            contract = Stock(position.symbol, "SMART", "USD")
+            ib.qualifyContracts(contract)
+            close_action = "SELL" if position.direction == "long" else "BUY"
+            order = MarketOrder(action=close_action, totalQuantity=close_qty)
+            trade = ib.placeOrder(contract, order)
+            ib.sleep(2)
+            filled = (
+                trade.fills[-1].execution.avgPrice
+                if trade.fills else position.entry_price
+            )
+            ib.disconnect()
+            return OrderResult(
+                success=True, order_id=str(order.orderId),
+                filled_price=filled, error=None, broker="ibkr",
+            )
+        except Exception as exc:
+            error = f"IBKR partial close failed for {position.symbol}: {exc}"
+            logger.exception("_partial_close_ibkr live: %s", error)
+            return OrderResult(
+                success=False, order_id=None,
+                filled_price=None, error=error, broker="ibkr",
+            )
+
+    # ------------------------------------------------------------------
+    # OANDA partial close
+    # ------------------------------------------------------------------
+
+    def _partial_close_oanda(
+        self,
+        position: Position,
+        close_fraction: float,
+        fill_price: float | None = None,
+    ) -> OrderResult:
+        """Close *close_fraction* of an OANDA forex position."""
+        is_paper = (
+            settings.bot.trading_mode != "live"
+            or not settings.oanda.enabled
+        )
+        if not is_paper:
+            try:
+                import oandapyV20  # noqa: F401
+            except ImportError:
+                is_paper = True
+
+        close_qty = position.quantity * close_fraction
+        paper_fill = fill_price if fill_price is not None else position.entry_price
+
+        if is_paper:
+            order_id = f"PAPER-OANDA-PARTIAL-{position.symbol}-{_ts()}"
+            logger.info(
+                "PAPER PARTIAL CLOSE: %s %s units=%.4f fill=%.5f",
+                position.symbol, position.direction, close_qty, paper_fill,
+            )
+            return OrderResult(
+                success=True, order_id=order_id,
+                filled_price=paper_fill, error=None, broker="oanda",
+            )
+
+        try:
+            import oandapyV20
+            from oandapyV20.endpoints import positions as oanda_positions
+
+            client = oandapyV20.API(
+                access_token=settings.oanda.api_key,
+                environment=settings.oanda.environment,
+            )
+            oanda_sym = _oanda_symbol(position.symbol)
+            units_int = int(close_qty)
+            close_data = (
+                {"longUnits": str(units_int)}
+                if position.direction == "long"
+                else {"shortUnits": str(units_int)}
+            )
+            request = oanda_positions.PositionClose(
+                accountID=settings.oanda.account_id,
+                instrument=oanda_sym,
+                data=close_data,
+            )
+            response = client.request(request)
+            tx_key = "longOrderFillTransaction" if position.direction == "long" else "shortOrderFillTransaction"
+            tx = response.get(tx_key, {})
+            filled_price = float(tx.get("price", position.entry_price))
+            order_id = str(tx.get("id", f"OANDA-PARTIAL-{position.symbol}-{_ts()}"))
+            logger.info(
+                "OANDA LIVE PARTIAL CLOSE: %s %s units=%.4f fill=%.5f id=%s",
+                oanda_sym, position.direction, close_qty, filled_price, order_id,
+            )
+            return OrderResult(
+                success=True, order_id=order_id,
+                filled_price=filled_price, error=None, broker="oanda",
+            )
+        except Exception as exc:
+            error = f"OANDA partial close failed for {position.symbol}: {exc}"
+            logger.exception("_partial_close_oanda live: %s", error)
+            return OrderResult(
+                success=False, order_id=None,
+                filled_price=None, error=error, broker="oanda",
             )
 
     # ------------------------------------------------------------------
@@ -568,6 +776,7 @@ class ExecutionAgent:
         self,
         position: Position,
         reason: str,
+        fill_price: float | None = None,
     ) -> OrderResult:
         """Close an IBKR stock position.
 
@@ -591,14 +800,15 @@ class ExecutionAgent:
 
         if is_paper:
             order_id = f"PAPER-IBKR-CLOSE-{position.symbol}-{_ts()}"
+            paper_fill = fill_price if fill_price is not None else position.entry_price
             logger.info(
-                "PAPER CLOSE: %s %s qty=%.4f reason=%s",
-                position.symbol, position.direction, position.quantity, reason,
+                "PAPER CLOSE: %s %s qty=%.4f fill=%.4f reason=%s",
+                position.symbol, position.direction, position.quantity, paper_fill, reason,
             )
             return OrderResult(
                 success=True,
                 order_id=order_id,
-                filled_price=position.entry_price,  # best estimate without live quote
+                filled_price=paper_fill,
                 error=None,
                 broker="ibkr",
             )
@@ -667,6 +877,7 @@ class ExecutionAgent:
         self,
         position: Position,
         reason: str,
+        fill_price: float | None = None,
     ) -> OrderResult:
         """Close an OANDA forex position."""
         is_paper = (
@@ -686,14 +897,15 @@ class ExecutionAgent:
 
         if is_paper:
             order_id = f"PAPER-OANDA-CLOSE-{position.symbol}-{_ts()}"
+            paper_fill = fill_price if fill_price is not None else position.entry_price
             logger.info(
-                "PAPER CLOSE: %s %s units=%.4f reason=%s",
-                position.symbol, position.direction, position.quantity, reason,
+                "PAPER CLOSE: %s %s units=%.4f fill=%.5f reason=%s",
+                position.symbol, position.direction, position.quantity, paper_fill, reason,
             )
             return OrderResult(
                 success=True,
                 order_id=order_id,
-                filled_price=position.entry_price,
+                filled_price=paper_fill,
                 error=None,
                 broker="oanda",
             )
