@@ -174,6 +174,9 @@ CANDIDATE_POOL: list[Instrument] = [
     Instrument(symbol="TSLA", broker="ibkr", asset_type="stock", yf_symbol="TSLA",
                active_hours_utc="13:30–20:00", slippage_pct=0.001, min_position_usd=10.0,
                correlated_with=[], notes="Tesla. High volatility momentum stock."),
+    Instrument(symbol="AMD",  broker="ibkr", asset_type="stock", yf_symbol="AMD",
+               active_hours_utc="13:30–20:00", slippage_pct=0.001, min_position_usd=10.0,
+               correlated_with=["NVDA", "QQQ", "XLK"], notes="AMD. High-beta semiconductor. Strong trend + momentum setups."),
     # ── Financials ──────────────────────────────────────────────────────────────
     Instrument(symbol="JPM",  broker="ibkr", asset_type="stock", yf_symbol="JPM",
                active_hours_utc="13:30–20:00", slippage_pct=0.0007, min_position_usd=10.0,
@@ -191,6 +194,9 @@ CANDIDATE_POOL: list[Instrument] = [
     Instrument(symbol="UNH",  broker="ibkr", asset_type="stock", yf_symbol="UNH",
                active_hours_utc="13:30–20:00", slippage_pct=0.0007, min_position_usd=10.0,
                correlated_with=["JNJ"], notes="UnitedHealth. Health insurance leader."),
+    Instrument(symbol="LLY",  broker="ibkr", asset_type="stock", yf_symbol="LLY",
+               active_hours_utc="13:30–20:00", slippage_pct=0.0008, min_position_usd=10.0,
+               correlated_with=[], notes="Eli Lilly. High-momentum pharma. GLP-1/weight-loss drug tailwind."),
     # ── Energy (oil / petroleum / integrated) ───────────────────────────────────
     Instrument(symbol="XOM",  broker="ibkr", asset_type="stock", yf_symbol="XOM",
                active_hours_utc="13:30–20:00", slippage_pct=0.0006, min_position_usd=10.0,
@@ -256,22 +262,32 @@ CANDIDATE_POOL: list[Instrument] = [
                correlated_with=[], notes="USD/JPY. Safe haven proxy. Note: yfinance returns JPY per USD."),
     Instrument(symbol="AUDUSD", broker="oanda", asset_type="forex", yf_symbol="AUDUSD=X",
                active_hours_utc="22:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
-               correlated_with=[], notes="AUD/USD. Commodity-linked currency."),
+               correlated_with=["NZDUSD"], notes="AUD/USD. Commodity-linked currency."),
     Instrument(symbol="USDCAD", broker="oanda", asset_type="forex", yf_symbol="CAD=X",
                active_hours_utc="13:00–21:00", slippage_pct=0.0003, min_position_usd=10.0,
                correlated_with=[], notes="USD/CAD. Oil-linked currency."),
     Instrument(symbol="USDCHF", broker="oanda", asset_type="forex", yf_symbol="CHF=X",
                active_hours_utc="07:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
                correlated_with=[], notes="USD/CHF. Safe haven. European session."),
+    Instrument(symbol="NZDUSD", broker="oanda", asset_type="forex", yf_symbol="NZDUSD=X",
+               active_hours_utc="22:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
+               correlated_with=["AUDUSD"], notes="NZD/USD. Commodity-linked currency. Lower corr than AUDUSD."),
     # ── Crypto ──────────────────────────────────────────────────────────────────
     Instrument(symbol="BTCUSD", broker="oanda", asset_type="crypto", yf_symbol="BTC-USD",
                active_hours_utc="00:00–23:59", slippage_pct=0.001, min_position_usd=10.0,
                correlated_with=["ETHUSD"], notes="Bitcoin / USD via OANDA. 24h weekdays."),
+    Instrument(symbol="ETHUSD", broker="oanda", asset_type="crypto", yf_symbol="ETH-USD",
+               active_hours_utc="00:00–23:59", slippage_pct=0.001, min_position_usd=10.0,
+               correlated_with=["BTCUSD"], notes="Ethereum / USD via OANDA. 24h weekdays."),
 ]
 
 # ── Quick-access helpers ───────────────────────────────────────────────────────
 
 UNIVERSE_BY_SYMBOL: dict[str, Instrument] = {i.symbol: i for i in UNIVERSE}
+
+# Full pool lookup — used as fallback when an open position's symbol is no longer
+# in the active UNIVERSE (e.g. dropped by weekly PortfolioAgent.select()).
+CANDIDATE_POOL_BY_SYMBOL: dict[str, Instrument] = {i.symbol: i for i in CANDIDATE_POOL}
 
 # Pairs that must not be held simultaneously (undirected)
 CORRELATION_BLACKLIST: list[frozenset[str]] = [
@@ -316,8 +332,24 @@ def get_universe_snapshot() -> list["Instrument"]:
 
 
 def get_instrument(symbol: str) -> Instrument:
-    """Return instrument metadata or raise KeyError."""
-    return UNIVERSE_BY_SYMBOL[symbol]
+    """Return instrument metadata.
+
+    Checks active UNIVERSE first; falls back to CANDIDATE_POOL so that open
+    positions for symbols dropped from the weekly universe can still be managed
+    (partial closes, exits, etc.).  Raises KeyError only if unknown to both.
+    """
+    try:
+        return UNIVERSE_BY_SYMBOL[symbol]
+    except KeyError:
+        return CANDIDATE_POOL_BY_SYMBOL[symbol]
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """Return True if *symbol* is a crypto instrument (trades on weekends)."""
+    try:
+        return get_instrument(symbol).asset_type == "crypto"
+    except KeyError:
+        return False
 
 
 def are_correlated(sym_a: str, sym_b: str) -> bool:

@@ -75,7 +75,7 @@ Circuit breaker resets at midnight UTC (new trading day). All open positions con
 
 ## PortfolioAgent (`agents/portfolio_agent.py`)
 
-Runs **weekly on Monday 00:00 UTC**. Scores all 40 instruments in the CANDIDATE_POOL and selects the best 8 stocks + 2 forex for the active trading universe.
+Runs **weekly on Monday 00:00 UTC**. Scores all 45 instruments in the CANDIDATE_POOL and selects the best 4 stocks + 4 forex + 2 crypto for the active trading universe.
 
 ### Data Used
 - **60-day daily OHLCV** (yfinance bulk fetch → IBKR fallback)
@@ -85,7 +85,7 @@ Runs **weekly on Monday 00:00 UTC**. Scores all 40 instruments in the CANDIDATE_
 ### Selection Algorithm
 
 ```
-For each symbol in CANDIDATE_POOL (40 instruments):
+For each symbol in CANDIDATE_POOL (45 instruments):
   1. Fetch 60d daily OHLCV
   2. Compute EMA9, EMA21, EMA50
   3. Hard gate: EMA9 > EMA21 (stocks require EMA21 > EMA50 too for weekly)
@@ -97,7 +97,7 @@ For each symbol in CANDIDATE_POOL (40 instruments):
      total = technical + fundamental + macro
 
 Sort stocks by total DESC, apply sector cap (max 2 per sector)
-Select top 8 stocks + top 2 forex
+Select top 4 stocks + top 4 forex + top 2 crypto (BTC force-included as anchor)
 Call set_active_universe(selected)
 Send Telegram: notify_portfolio_updated()
 ```
@@ -199,8 +199,24 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 4. position_usd = max_position_usd × tier.size_fraction()
    # SMALL=0.25, MEDIUM=0.50, LARGE=0.75, FULL=1.00
 
-5. Apply macro multiplier (from Cat8):
-   position_usd × macro_multiplier  (HIGH=0.5×, MEDIUM=0.75×, LOW=1.0×)
+5. Apply volatility/macro multiplier:
+   - **Stocks / Crypto**: LLM-derived from Cat8 risk_level  (HIGH=0.5×, MEDIUM=0.75×, LOW=1.0×)
+   - **Forex**: pair-specific vol multiplier (see table below) — LLM multiplier is NOT used
+
+   Forex vol multiplier:
+   - EUR pairs (EURUSD, EURGBP, …): based on EVZ (CBOE Euro Vol Index), refreshed hourly
+     | EVZ          | Multiplier |
+     |--------------|------------|
+     | ≥ 8.5        | 0.50×      |
+     | 6.5 – 8.5    | 0.75×      |
+     | < 6.5        | 1.00×      |
+   - Other forex pairs: based on pair's own 1h ATR%
+     | ATR%         | Multiplier |
+     |--------------|------------|
+     | > 0.8%       | 0.50×      |
+     | 0.5% – 0.8%  | 0.75×      |
+     | < 0.5%       | 1.00×      |
+   - Data unavailable (fetch error): conservative fallback → 0.75×
 
 6. ATR volatility scaling (if ATR available):
    atr_pct = atr / entry_price
@@ -227,7 +243,7 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 10. risk_dollars = |entry - stop| × quantity
 
 11. Risk cap enforcement:
-    max_risk = broker_cap × RISK_PER_TRADE  (1%)
+    max_risk = broker_cap × RISK_PER_TRADE  (3%)
     if risk_dollars > max_risk:
         scale quantity down: qty = floor(max_risk / |entry - stop|, 4 decimals)
         recompute position_usd, risk_dollars
@@ -235,10 +251,23 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 
 ### ATR Multipliers
 
-| Asset Type | SL Multiplier | TP Multiplier | Ratio |
-|------------|---------------|---------------|-------|
-| Stock | 2.0× ATR | 4.0× ATR | 2:1 |
-| Forex | 1.5× ATR | 3.0× ATR | 2:1 |
+**Stop-loss** multipliers are fixed per asset type:
+
+| Asset Type | SL Multiplier |
+|------------|---------------|
+| Stock | 2.0× ATR |
+| Forex | 1.5× ATR |
+
+**Take-profit** multipliers scale with position tier (higher conviction = wider TP):
+
+| Position Tier | TP Multiplier |
+|---------------|---------------|
+| SMALL (55–59) | 4.0× ATR |
+| MEDIUM (60–69) | 5.0× ATR |
+| LARGE (70–79) | 6.0× ATR |
+| FULL (≥ 80) | 6.5× ATR |
+
+This means a FULL-confidence trade has a 3.25:1 R:R (stock) or 4.33:1 R:R (forex), while a SMALL trade has 2:1 (stock) or 2.67:1 (forex).
 
 ### RiskParams Output
 

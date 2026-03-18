@@ -23,7 +23,7 @@ class Instrument:
     correlated_with: list[str]  # Symbols that cannot be held simultaneously
 ```
 
-### CANDIDATE_POOL (40 instruments)
+### CANDIDATE_POOL (45 instruments)
 
 The full universe evaluated weekly/daily by PortfolioAgent/PreScreenAgent:
 
@@ -33,14 +33,15 @@ The full universe evaluated weekly/daily by PortfolioAgent/PreScreenAgent:
 | Tech ETFs | XLK |
 | Finance ETF | XLF |
 | Energy ETF | XLE |
-| Tech stocks | AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA |
+| Tech stocks | AAPL, MSFT, NVDA, AMD, GOOGL, AMZN, META, TSLA |
 | Finance | JPM, GS, BAC |
-| Healthcare | JNJ, UNH |
+| Healthcare | JNJ, UNH, LLY |
 | Energy | XOM, CVX, OXY, COP, SLB, HAL, MPC, VLO |
 | Gold | GLD, GOLD, NEM, GDX, GDXJ |
 | Consumer | WMT, COST |
 | Industrial | CAT |
-| Forex | EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF |
+| Forex | EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD |
+| Crypto | BTCUSD, ETHUSD |
 
 ### Active UNIVERSE
 
@@ -63,12 +64,14 @@ Instruments with high correlation cannot be held simultaneously. Groups:
 | Group | Instruments |
 |-------|-------------|
 | Broad market | SPY ↔ QQQ |
-| Tech cluster | QQQ ↔ NVDA, MSFT, AAPL |
+| Tech cluster | QQQ ↔ NVDA, AMD, MSFT, AAPL |
 | Energy cluster | XOM ↔ CVX ↔ OXY ↔ COP ↔ XLE |
 | Gold cluster | GOLD ↔ NEM ↔ GDX ↔ GDXJ |
 | Forex EUR | EURUSD ↔ GBPUSD |
+| Forex commodity | AUDUSD ↔ NZDUSD |
 | Consumer | WMT ↔ COST |
 | Healthcare | JNJ ↔ UNH |
+| Crypto | BTCUSD ↔ ETHUSD |
 
 ---
 
