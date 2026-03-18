@@ -131,7 +131,7 @@ _TARGET_ATR_PCT = 0.02   # target 2% ATR exposure per position (for vol scaling)
 # Forex position multiplier — applied before vol/EVZ reduction.
 # Compensates for forex's tiny pip moves: at 1× a SMALL EURUSD position is ~100 units;
 # at 2× it reaches ~200 units, still well within the per-broker risk cap.
-_FOREX_SIZE_MULT = 1.35
+_FOREX_SIZE_MULT = 1.5
 
 
 # ---------------------------------------------------------------------------
