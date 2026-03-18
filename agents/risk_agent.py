@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from typing import Optional
 
 from agents.confidence_scorer import ConfidenceResult, PositionTier
 from portfolio.state import PortfolioStateManager
@@ -29,10 +30,108 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# ATR-based stop/TP multipliers (matching backtest parameters)
+
+# ---------------------------------------------------------------------------
+# Forex-specific volatility multiplier
+# ---------------------------------------------------------------------------
+
+# EVZ (CBOE Euro Currency Volatility Index) thresholds
+_EVZ_HIGH   = 8.5   # above → high vol → reduce to 0.5×
+_EVZ_MEDIUM = 6.5   # above → moderate vol → reduce to 0.75×
+
+# For non-EUR pairs: ATR%-based thresholds (realised vol proxy)
+_FOREX_ATR_HIGH   = 0.008   # >0.8% ATR per 1h bar → high vol
+_FOREX_ATR_MEDIUM = 0.005   # >0.5% ATR per 1h bar → medium vol
+
+# EUR-based pairs that map to EVZ
+_EUR_PAIRS = {"EURUSD", "EURGBP", "EURJPY", "EURCHF", "EURAUD", "EURCAD"}
+
+# Module-level EVZ cache — refreshed at most once per hour from MacroContext
+_evz_cache: dict = {"value": 7.0, "updated_at": None}
+_EVZ_CACHE_TTL_SECONDS = 3600
+
+
+def update_evz_cache(evz: float) -> None:
+    """Called by the orchestrator after each MacroContext fetch to refresh EVZ."""
+    from datetime import datetime
+    _evz_cache["value"] = evz
+    _evz_cache["updated_at"] = datetime.utcnow()
+    logger.debug("RiskAgent: EVZ cache updated → %.2f", evz)
+
+
+def _get_evz() -> float:
+    """Return cached EVZ value (default 7.0 if never set)."""
+    return _evz_cache["value"]
+
+
+def _forex_vol_multiplier(symbol: str, atr: Optional[float], current_price: float) -> float:
+    """Return a [0.5, 1.0] volatility multiplier for a forex instrument.
+
+    - EUR pairs: use EVZ from the hourly-refreshed cache (populated by MacroContext).
+    - Other pairs: use the pair's own ATR% as a realised-vol proxy.
+    Falls back to 0.75 (conservative) on missing data.
+    """
+    try:
+        if symbol.upper() in _EUR_PAIRS:
+            evz_val = _get_evz()
+            if evz_val >= _EVZ_HIGH:
+                mult = 0.5
+            elif evz_val >= _EVZ_MEDIUM:
+                mult = 0.75
+            else:
+                mult = 1.0
+            logger.info("RiskAgent: %s forex vol (EVZ=%.2f) → multiplier=%.2f", symbol, evz_val, mult)
+            return mult
+        else:
+            # Use pair's own ATR% as realised-vol proxy
+            if atr is None or atr <= 0 or current_price <= 0:
+                return 0.75
+            atr_pct = atr / current_price
+            if atr_pct >= _FOREX_ATR_HIGH:
+                mult = 0.5
+            elif atr_pct >= _FOREX_ATR_MEDIUM:
+                mult = 0.75
+            else:
+                mult = 1.0
+            logger.info("RiskAgent: %s forex vol (atr_pct=%.3f%%) → multiplier=%.2f",
+                        symbol, atr_pct * 100, mult)
+            return mult
+    except Exception:
+        logger.debug("RiskAgent: forex_vol_multiplier failed for %s — defaulting to 0.75", symbol)
+        return 0.75
+
+# ATR-based stop multipliers (fixed per asset type)
 _ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 1.5, "crypto": 2.0}
-_ATR_TP_MULT: dict[str, float] = {"stock": 4.0, "forex": 4.0, "crypto": 4.0}
+
+# ATR-based TP multipliers — scale with confidence tier for better R:R on high-conviction trades
+# Stocks: lower multiplier because stock ATR% is already large (0.5–2% per 1h bar)
+# Tier:   SMALL  MEDIUM  LARGE  FULL
+_ATR_TP_MULT_BY_TIER: dict[str, float] = {
+    "SMALL":  4.0,
+    "MEDIUM": 5.0,
+    "LARGE":  6.0,
+    "FULL":   6.5,
+}
+_ATR_TP_MULT_DEFAULT = 5.0  # fallback if tier not found
+
+# Forex TP multipliers — larger because forex ATR% is ~10–20× smaller than stocks
+# (EURUSD 1h ATR ≈ 0.05–0.10% vs stocks 0.5–2%).  Using 10–15× brings the TP
+# distance to ~0.6–1.2% of price (60–120 pips on EURUSD), capturing sustained trends.
+# R:R improves to 6.7–10:1.
+# Tier:   SMALL  MEDIUM  LARGE  FULL
+_ATR_TP_MULT_BY_TIER_FOREX: dict[str, float] = {
+    "SMALL":  10.0,   # ~80 pips / ~0.74%
+    "MEDIUM": 12.0,   # ~96 pips / ~0.89%
+    "LARGE":  14.0,   # ~112 pips / ~1.04%
+    "FULL":   15.0,   # ~120 pips / ~1.11%
+}
+
 _TARGET_ATR_PCT = 0.02   # target 2% ATR exposure per position (for vol scaling)
+
+# Forex position multiplier — applied before vol/EVZ reduction.
+# Compensates for forex's tiny pip moves: at 1× a SMALL EURUSD position is ~100 units;
+# at 2× it reaches ~200 units, still well within the per-broker risk cap.
+_FOREX_SIZE_MULT = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -127,20 +226,31 @@ class RiskAgent:
         # ── Step 1: size_fraction from tier ───────────────────────────────
         size_fraction = tier.size_fraction()
 
-        # ── Step 2: max position = 2/3 of this broker's capital ──────────
+        # ── Step 2: max position = 2/3 of this broker's compounded capital ──
+        # Compound realized gains into the capital base so closed profits
+        # grow the available budget for new positions.
         broker_cap = settings.bot.broker_capital(instrument.broker)
+        if self._state is not None:
+            broker_cap = broker_cap + self._state.realized_pnl_by_broker(instrument.broker)
         max_position_usd = broker_cap * 0.667
 
         # ── Step 3: target position in USD ────────────────────────────────
         position_size_usd = max_position_usd * size_fraction
 
-        # ── Step 3b: apply macro risk multiplier ──────────────────────────
-        macro_mult = getattr(confidence_result, "macro_multiplier", 1.0)
-        macro_mult = max(0.0, min(macro_mult, 1.0))  # clamp to [0, 1]
+        # ── Step 3b: apply volatility/macro risk multiplier ──────────────
+        # Forex: scale up first (_FOREX_SIZE_MULT), then apply EVZ/ATR vol reduction.
+        # Stocks/crypto: use LLM-derived macro_multiplier (VIX/news based)
+        asset_type_early = instrument.asset_type
+        if asset_type_early == "forex":
+            position_size_usd *= _FOREX_SIZE_MULT
+            macro_mult = _forex_vol_multiplier(symbol, atr, current_price)
+        else:
+            macro_mult = getattr(confidence_result, "macro_multiplier", 1.0)
+            macro_mult = max(0.0, min(macro_mult, 1.0))
         position_size_usd *= macro_mult
         if macro_mult < 1.0:
             logger.info(
-                "RiskAgent: %s macro reduction %.0f%% (multiplier=%.2f)",
+                "RiskAgent: %s vol/macro reduction %.0f%% (multiplier=%.2f)",
                 symbol, macro_mult * 100, macro_mult,
             )
 
@@ -190,9 +300,15 @@ class RiskAgent:
         entry_price = current_price
         asset_type = instrument.asset_type
 
+        # Select TP multiplier table by asset type — forex uses a larger mult to
+        # compensate for its naturally lower ATR% (~0.05–0.10% vs stock 0.5–2%)
+        if asset_type == "forex":
+            tp_mult = _ATR_TP_MULT_BY_TIER_FOREX.get(tier.value, _ATR_TP_MULT_DEFAULT)
+        else:
+            tp_mult = _ATR_TP_MULT_BY_TIER.get(tier.value, _ATR_TP_MULT_DEFAULT)
         if atr is not None and atr > 0:
             sl_dist = atr * _ATR_SL_MULT.get(asset_type, 2.0)
-            tp_dist = atr * _ATR_TP_MULT.get(asset_type, 4.0)
+            tp_dist = atr * tp_mult
         else:
             sl_dist = entry_price * self.STOP_PCT
             tp_dist = entry_price * self.TP_PCT
@@ -327,16 +443,18 @@ def test_risk_agent() -> None:
 
     # ── Test 1: SMALL tier — EURUSD at 1.08 ──────────────────────────────
     # EURUSD is forex → broker="oanda" → uses broker_capital("oanda")
+    # EVZ cache defaults to 7.0 → _EVZ_MEDIUM threshold (6.5) hit → mult=0.75
     oanda_cap = settings.bot.broker_capital("oanda")
     max_pos_oanda = oanda_cap * 0.667
+    evz_mult = _forex_vol_multiplier("EURUSD", None, 1.08)   # 0.75 at default EVZ=7.0
     cr_small = make_cr(PositionTier.SMALL, "long")
     rp = agent.compute(cr_small, current_price=1.08, symbol="EURUSD")
     assert rp is not None, "SMALL tier should produce RiskParams"
-    expected_qty  = round(max_pos_oanda * 0.25 / 1.08)
+    expected_qty  = round(max_pos_oanda * PositionTier.SMALL.size_fraction() * _FOREX_SIZE_MULT * evz_mult / 1.08)
     expected_size = expected_qty * 1.08
     assert rp.quantity == float(expected_qty), f"Expected qty={expected_qty}, got {rp.quantity}"
     assert rp.position_tier == "SMALL"
-    assert rp.size_fraction == 0.25
+    assert rp.size_fraction == PositionTier.SMALL.size_fraction()
     assert abs(rp.position_size_usd - expected_size) < 0.01, (
         f"position_size_usd mismatch: {rp.position_size_usd}"
     )
@@ -349,7 +467,7 @@ def test_risk_agent() -> None:
     cr_full = make_cr(PositionTier.FULL, "long")
     rp2 = agent.compute(cr_full, current_price=500.0, symbol="SPY")
     assert rp2 is not None, "FULL tier should produce RiskParams"
-    expected_raw_qty  = max_pos_ibkr / 500.0
+    expected_raw_qty  = max_pos_ibkr * PositionTier.FULL.size_fraction() / 500.0
     stop_distance_spy = 500.0 * 0.015
     max_risk_usd      = ibkr_cap * settings.bot.risk_per_trade
     if expected_raw_qty * stop_distance_spy > max_risk_usd:
@@ -359,7 +477,7 @@ def test_risk_agent() -> None:
         expected_qty2 = round(expected_raw_qty, 4)
     assert rp2.quantity == expected_qty2, f"Expected qty={expected_qty2} (post-cap), got {rp2.quantity}"
     assert rp2.position_tier == "FULL"
-    assert rp2.size_fraction == 1.00
+    assert rp2.size_fraction == PositionTier.FULL.size_fraction()
     print(f"Test 2 PASS — SPY FULL: qty={rp2.quantity}, size_usd={rp2.position_size_usd:.2f} (risk-capped)")
 
     # ── Test 3: risk_dollars <= broker_capital * risk_per_trade ──────────
