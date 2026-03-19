@@ -219,10 +219,34 @@ a { color: inherit; text-decoration: none; }
 button { cursor: pointer; font-family: var(--sans); }
 input, select { font-family: var(--sans); }
 
-/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+/* ── Scrollbar — global (vertical, e.g. page scroll) ───────────────────────── */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 0; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Scrollbar — table-wrap horizontal ──────────────────────────────────────── */
+/* Firefox */
+.table-wrap {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+/* WebKit */
+.table-wrap::-webkit-scrollbar { height: 4px; width: 4px; }
+.table-wrap::-webkit-scrollbar-track {
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+.table-wrap::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+.table-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+html.dark .table-wrap::-webkit-scrollbar-track { background: var(--bg-card); }
+html.dark .table-wrap::-webkit-scrollbar-thumb { background: #3A342C; }
+html.dark .table-wrap::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
 /* ══════════════════════════════════════════════════════════════════════════════
    TOP NAV
@@ -907,6 +931,11 @@ table.dt tr:last-child td { border-bottom: none; }
   align-items: start;
   transition: grid-template-columns 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
+/* Prevent grid children from blowing past their 1fr column when table content is wide */
+.ov-bottom-grid > * {
+  min-width: 0;
+  overflow: hidden;
+}
 .ov-bottom-grid.pos-expanded {
   grid-template-columns: 1fr;
 }
@@ -960,6 +989,7 @@ html.dark .ov-pos-card.expanded .ov-expand-btn {
 .ov-pos-full-wrap {
   display: none;
   animation: fadeSlideIn 0.25s ease both;
+  overflow-x: auto;
 }
 .ov-pos-card.expanded .ov-pos-full-wrap {
   display: block;
