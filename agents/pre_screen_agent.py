@@ -222,9 +222,11 @@ class PreScreenAgent:
         scored_forex.sort(key=lambda t: t[0], reverse=True)
         scored_crypto.sort(key=lambda t: t[0], reverse=True)
 
-        # Greedy correlation-aware stock selection
+        # Greedy correlation-aware + sector-capped stock selection
+        MAX_PER_SECTOR = 2
         selected_stocks: list[Instrument] = []
         selected_symbols: set[str] = set()
+        sector_counts: dict[str, int] = {}
 
         for _score, inst in scored_stocks:
             if len(selected_stocks) >= self.MAX_STOCKS:
@@ -232,8 +234,13 @@ class PreScreenAgent:
             if any(corr in selected_symbols for corr in inst.correlated_with):
                 logger.debug("  %s: skipped (correlated)", inst.symbol)
                 continue
+            sector = _SECTOR.get(inst.symbol, "other")
+            if sector_counts.get(sector, 0) >= MAX_PER_SECTOR:
+                logger.debug("  %s: skipped (sector cap reached for '%s')", inst.symbol, sector)
+                continue
             selected_stocks.append(inst)
             selected_symbols.add(inst.symbol)
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
         # Forex: select top MAX_FOREX by score
         selected_forex: list[Instrument] = []
