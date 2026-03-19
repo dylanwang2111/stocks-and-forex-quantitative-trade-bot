@@ -130,9 +130,10 @@ class Scanner:
         # Snapshot current open positions once so we're consistent
         open_positions = self._state.all_positions()
         open_symbols: set[str] = {p.symbol for p in open_positions}
+        partial_exit_symbols = {p.symbol for p in open_positions if p.partial_exit_done}
 
         # Refresh CorrelationGuard with live portfolio symbols
-        self._corr_guard.update_open_symbols(list(open_symbols))
+        self._corr_guard.update_open_symbols(list(open_symbols), partial_exit_symbols)
 
         results: list[ScanResult] = []
 

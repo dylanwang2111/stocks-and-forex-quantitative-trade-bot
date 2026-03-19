@@ -954,8 +954,10 @@ class Orchestrator:
             return
 
         # ── Guard 4: correlation ───────────────────────────────────────────────
-        open_symbols = [p.symbol for p in self._state.all_positions()]
-        self._correlation_guard.update_open_symbols(open_symbols)
+        all_positions = self._state.all_positions()
+        open_symbols = [p.symbol for p in all_positions]
+        partial_exit_symbols = {p.symbol for p in all_positions if p.partial_exit_done}
+        self._correlation_guard.update_open_symbols(open_symbols, partial_exit_symbols)
         corr_allowed, corr_reason = self._correlation_guard.is_allowed(symbol)
         if not corr_allowed:
             logger.info(

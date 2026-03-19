@@ -35,12 +35,28 @@ class CorrelationGuard:
             :meth:`update_open_symbols` before every ``is_allowed`` check.
         """
         self._open_symbols: list[str] = list(open_symbols or [])
+        self._partial_exit_symbols: set[str] = set()  # positions already 50% exited (phase 2)
 
     # ── State management ───────────────────────────────────────────────────────
 
-    def update_open_symbols(self, symbols: list[str]) -> None:
-        """Sync guard state with the live portfolio before each check."""
+    def update_open_symbols(
+        self,
+        symbols: list[str],
+        partial_exit_symbols: set[str] | None = None,
+    ) -> None:
+        """Sync guard state with the live portfolio before each check.
+
+        Parameters
+        ----------
+        symbols:
+            All currently open position symbols.
+        partial_exit_symbols:
+            Subset of *symbols* that have already had their 50% partial exit
+            (phase 2). Correlated entries are permitted against these because
+            the remaining exposure has been halved.
+        """
         self._open_symbols = list(symbols)
+        self._partial_exit_symbols = set(partial_exit_symbols or [])
         logger.debug("CorrelationGuard updated open symbols: %s", self._open_symbols)
 
     # ── Core check ────────────────────────────────────────────────────────────
@@ -70,6 +86,13 @@ class CorrelationGuard:
         # ── Check 2: correlation blacklist ─────────────────────────────────────
         for open_sym in self._open_symbols:
             if are_correlated(candidate_symbol, open_sym):
+                if open_sym in self._partial_exit_symbols:
+                    logger.debug(
+                        "CorrelationGuard: %s correlated with %s but that position "
+                        "is phase-2 (50%% exited) — allowing entry",
+                        candidate_symbol, open_sym,
+                    )
+                    continue
                 reason = (
                     f"{candidate_symbol} is correlated with open position {open_sym}"
                 )
