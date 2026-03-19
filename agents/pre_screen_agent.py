@@ -127,6 +127,8 @@ class PreScreenAgent:
             ib.connect(host, port, clientId=clientId, timeout=15, readonly=True)
             for instrument in CANDIDATE_POOL:
                 sym = instrument.symbol
+                if instrument.asset_type == "crypto":
+                    continue  # crypto is OANDA-only — IBKR has no definition for these
                 try:
                     if instrument.asset_type == "forex":
                         contract = Forex(sym.upper().replace("/", ""))
