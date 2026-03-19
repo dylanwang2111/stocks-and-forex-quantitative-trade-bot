@@ -150,7 +150,9 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _build_equity_curve(total_capital: float, db: Session) -> list[dict]:
+def _build_equity_curve(
+    total_capital: float, db: Session, unrealized_pnl: float = 0.0
+) -> list[dict]:
     closed = db.query(Trade).filter(
         Trade.status == "closed", Trade.exit_time.isnot(None)
     ).all()
@@ -186,6 +188,13 @@ def _build_equity_curve(total_capital: float, db: Session) -> list[dict]:
     if len(curve) > 300:
         step = len(curve) // 300
         curve = [curve[i] for i in range(0, len(curve), step)]
+
+    # Append a live "now" point that includes unrealized PnL so the curve
+    # endpoint matches the Current Equity metric in the overview
+    now_equity = round(total_capital + cumsum + unrealized_pnl, 2)
+    if not curve or curve[-1]["v"] != now_equity:
+        curve.append({"t": _iso(datetime.utcnow()), "v": now_equity})
+
     return curve
 
 
@@ -271,7 +280,6 @@ def api_overview():
             )
             open_trades = db.query(Trade).filter(Trade.status == "open").all()
             pnl = _calc_pnl_totals(db, total_capital)
-            curve = _build_equity_curve(total_capital, db)
 
         snap_age = None
         last_snap_time = None
@@ -304,6 +312,9 @@ def api_overview():
                 else:
                     total_unrealized += (t.entry_price - cp) * qty
         total_unrealized = round(total_unrealized, 2)
+
+        with get_db() as db2:
+            curve = _build_equity_curve(total_capital, db2, unrealized_pnl=total_unrealized)
 
         # Capital allocation — use remaining_quantity (post-partial-close) for deployed
         def _eff_qty(t: Trade) -> float:
