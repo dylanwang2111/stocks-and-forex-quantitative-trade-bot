@@ -927,10 +927,10 @@ table.dt tr:last-child td { border-bottom: none; }
   gap: 20px;
 }
 
-/* Overview bottom grid: same 2-col layout, but collapses when positions expanded */
+/* Overview bottom grid: 4:6 ratio — alloc table is compact, positions table is wider */
 .ov-bottom-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 2fr 3fr;
   gap: 20px;
   align-items: start;
   transition: grid-template-columns 0.35s cubic-bezier(0.4, 0, 0.2, 1);
