@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 try:
@@ -266,7 +266,8 @@ class Orchestrator:
                     len(selected),
                     ", ".join(i.symbol for i in selected),
                 )
-                self._notifier.notify_portfolio_updated(selected)
+                open_syms = [p.symbol for p in self._state.all_positions()]
+                self._notifier.notify_portfolio_updated(selected, open_symbols=open_syms)
             else:
                 logger.warning(
                     "_daily_prescreen: no instruments selected — keeping current universe"
@@ -288,7 +289,8 @@ class Orchestrator:
                     len(selected),
                     ", ".join(i.symbol for i in selected),
                 )
-                self._notifier.notify_portfolio_updated(selected)
+                open_syms = [p.symbol for p in self._state.all_positions()]
+                self._notifier.notify_portfolio_updated(selected, open_symbols=open_syms)
             else:
                 logger.warning("Portfolio selection returned no instruments; keeping current universe.")
         except Exception:
@@ -566,41 +568,68 @@ class Orchestrator:
             self._state.save_snapshot()
         except Exception:
             logger.exception("save_snapshot: failed")
+        # Refresh EVZ cache for forex vol sizing (once per hour is sufficient)
         try:
-            positions = self._state.all_positions()
-            daily_pnl = self._state.daily_pnl()
-            equity = self._state.available_cash() + self._state.deployed_capital()
+            from agents.portfolio_agent import _fetch_macro_context_shared
+            from agents.risk_agent import update_evz_cache
+            ctx = _fetch_macro_context_shared()
+            update_evz_cache(ctx.evz)
+        except Exception:
+            logger.debug("save_snapshot: EVZ cache refresh failed — keeping previous value")
+        try:
+            positions      = self._state.all_positions()
+            daily_pnl      = self._state.daily_pnl()
+            total_realized = self._state.total_realized_pnl()
+            deployed       = self._state.deployed_capital()
+            avail_cash     = self._state.available_cash()
 
-            # Calculate unrealized P&L from current prices.
-            # Use cache so we reuse prices already fetched in the scan cycle
-            # (avoids rate-limit failures at snapshot time).
-            unrealized_pnl = 0.0
+            # Unrealized P&L — try cache first, fall back to live fetch.
+            # Tracks how many symbols had no price data (markets closed etc).
+            unrealized_pnl  = 0.0
+            prices_missing  = 0
+            price_map: dict[str, float] = {}
             from data.fetcher import fetch_candles
             for pos in positions:
-                try:
-                    df = fetch_candles(pos.symbol, "1h", use_cache=True)
-                    if df is not None and not df.empty:
-                        current_price = float(df["close"].iloc[-1])
-                        unrealized_pnl += pos.unrealized_pnl(current_price)
-                    else:
-                        logger.warning(
-                            "save_snapshot: empty price data for %s — unrealized P&L excluded",
-                            pos.symbol,
-                        )
-                except Exception as exc:
+                price_fetched = False
+                for use_cache in (True, False):
+                    try:
+                        df = fetch_candles(pos.symbol, "1h", use_cache=use_cache)
+                        if df is not None and not df.empty:
+                            current_price = float(df["close"].iloc[-1])
+                            unrealized_pnl += pos.unrealized_pnl(current_price)
+                            price_map[pos.symbol] = current_price
+                            price_fetched = True
+                            break
+                    except Exception:
+                        pass
+                if not price_fetched:
+                    prices_missing += 1
                     logger.warning(
-                        "save_snapshot: could not fetch price for %s: %s — unrealized P&L excluded",
-                        pos.symbol, exc,
+                        "save_snapshot: no price for %s — excluded from unrealized P&L",
+                        pos.symbol,
                     )
+
+            # Patch the saved snapshot with live prices so the dashboard can
+            # compute unrealized P&L without re-fetching.
+            if price_map:
+                try:
+                    self._state.update_snapshot_prices(price_map)
+                except Exception:
+                    logger.debug("save_snapshot: price patch failed", exc_info=True)
+
+            # True mark-to-market equity: capital + all realised + unrealized
+            equity = settings.bot.total_capital + total_realized + unrealized_pnl
 
             self._notifier.notify_daily_summary(
                 open_positions=len(positions),
                 daily_pnl=daily_pnl,
+                total_realized=total_realized,
                 unrealized_pnl=round(unrealized_pnl, 2),
-                total_equity=equity,
+                total_equity=round(equity, 2),
                 trading_mode=self._trading_mode,
-                deployed=round(self._state.deployed_capital(), 2),
-                available_cash=round(self._state.available_cash(), 2),
+                deployed=round(deployed, 2),
+                available_cash=round(avail_cash, 2),
+                prices_missing=prices_missing,
             )
         except Exception:
             logger.exception("save_snapshot: failed to send Telegram summary")
@@ -635,7 +664,18 @@ class Orchestrator:
 
         for position in positions:
             symbol = position.symbol
-            held_days = (now_utc - position.entry_time).days
+            entry_date = position.entry_time.date()
+            now_date   = now_utc.date()
+            # Crypto trades 24/7 — count calendar days.
+            # Stocks and forex use weekday-only counting (market closed Sat/Sun).
+            from portfolio.watchlist import is_crypto_symbol
+            if is_crypto_symbol(symbol):
+                held_days = (now_date - entry_date).days
+            else:
+                held_days = sum(
+                    1 for i in range((now_date - entry_date).days)
+                    if (entry_date + timedelta(days=i + 1)).weekday() < 5
+                )
 
             # ── Fetch current price once (used for all checks below) ────────
             current_price: float | None = None
@@ -677,21 +717,53 @@ class Orchestrator:
                 if in_phase2:
                     # ── Partial exit: first cycle entering Phase 2 ──────────
                     if not position.partial_exit_done:
-                        partial = self._exec_agent.partial_close_position(
-                            position=position,
-                            close_fraction=0.5,
-                            fill_price=current_price,
-                        )
-                        if partial.success:
+                        # Stocks need an open market to get an accurate fill price
+                        try:
+                            from portfolio.watchlist import get_instrument as _get_instr
+                            _instr = _get_instr(symbol)
+                            _market_open = self._scanner._is_market_open(_instr)
+                        except Exception:
+                            _market_open = True  # fail open for unknown instruments
+                        if not _market_open:
                             logger.info(
-                                "Phase-2 entry: %s %s — closed 50%% @ %.4f (TP confirmed x%d)",
-                                symbol, position.direction, current_price,
-                                position.tp_breach_streak,
+                                "Phase-2 partial close deferred: %s market closed — will execute at next open",
+                                symbol,
                             )
                         else:
-                            logger.error(
-                                "Partial close failed for %s: %s", symbol, partial.error
+                            partial = self._exec_agent.partial_close_position(
+                                position=position,
+                                close_fraction=0.5,
+                                fill_price=current_price,
                             )
+                            if partial.success:
+                                logger.info(
+                                    "Phase-2 entry: %s %s — closed 50%% @ %.4f (TP confirmed x%d)",
+                                    symbol, position.direction, current_price,
+                                    position.tp_breach_streak,
+                                )
+                                closed_qty = position.quantity * 0.5
+                                if position.direction == "long":
+                                    partial_pnl = (current_price - position.entry_price) * closed_qty
+                                else:
+                                    partial_pnl = (position.entry_price - current_price) * closed_qty
+                                self._notifier.notify_partial_close(
+                                    symbol=symbol,
+                                    direction=position.direction,
+                                    entry_price=position.entry_price,
+                                    exit_price=current_price,
+                                    closed_qty=closed_qty,
+                                    pnl=partial_pnl,
+                                )
+                                # Persist partial_exit_done=True immediately so a restart
+                                # doesn't re-trigger the partial close before the hourly snapshot.
+                                try:
+                                    self._state.save_snapshot()
+                                except Exception:
+                                    logger.warning("save_snapshot after partial close failed", exc_info=True)
+                            else:
+                                logger.error(
+                                    "Partial close failed for %s: %s", symbol, partial.error
+                                )
 
                     # ── Trailing stop on remaining 50% ──────────────────────
                     self._update_trailing_stop(position, current_price)
@@ -973,6 +1045,10 @@ class Orchestrator:
                 risk_dollars=risk_params.risk_dollars,
                 position_size_usd=risk_params.position_size_usd,
             )
+            try:
+                self._state.save_snapshot()
+            except Exception:
+                logger.warning("save_snapshot after new position failed", exc_info=True)
         else:
             logger.error(
                 "Order failed: %s — %s", symbol, result.error
@@ -1034,9 +1110,9 @@ class Orchestrator:
 
     def _update_trailing_stop(self, position: Position, current_price: float) -> None:
         """
-        Phase-2 trailing stop: ratchets stop behind price at 2.1×ATR(14, 1h).
-          long:  new_stop = max(current_stop, current_price - 2.1×ATR)
-          short: new_stop = min(current_stop, current_price + 2.1×ATR)
+        Phase-2 trailing stop: ratchets stop behind price at 2.5×ATR(14, 1h).
+          long:  new_stop = max(current_stop, current_price - 2.5×ATR)
+          short: new_stop = min(current_stop, current_price + 2.5×ATR)
         Only called after TP has been breached — no entry-threshold guard needed.
         Falls back to 2% of price when ATR is unavailable.
         """
@@ -1056,7 +1132,7 @@ class Orchestrator:
             logger.debug("_update_trailing_stop: ATR fetch failed for %s", position.symbol)
             return
 
-        trail_dist = 2.1 * atr
+        trail_dist = 2.5 * atr
         old_stop = position.stop_price
 
         if position.direction == "long":
