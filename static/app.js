@@ -1,3 +1,14 @@
+/* ── XSS escape helper ─────────────────────────────────────────────────────── */
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
 /* ── Dark mode ─────────────────────────────────────────────────────────────── */
 function isDark() {
   return document.documentElement.classList.contains('dark');
@@ -410,7 +421,7 @@ function _renderOvPositionsMini(data) {
     const tpCls   = p.dist_tp_pct   != null && p.dist_tp_pct   < 0  ? 'pnl-neg'
                   : p.dist_tp_pct   != null                          ? 'pnl-pos' : '';
     return `<tr>
-      <td style="font-weight:600">${p.symbol}</td>
+      <td style="font-weight:600">${esc(p.symbol)}</td>
       <td>${dirBadge(p.direction)}</td>
       <td style="font-family:var(--mono);font-size:11px">${fmtNum(p.entry_price, 4)}</td>
       <td style="font-family:var(--mono);font-size:11px">${p.current_price ? fmtNum(p.current_price, 4) : '—'}</td>
@@ -436,7 +447,7 @@ function _renderOvPositionsFull(data) {
     const stopCls     = p.dist_stop_pct != null && p.dist_stop_pct < 0.5 ? 'pnl-neg' : '';
     const daysLeftCls = p.days_left != null && p.days_left <= 1 ? 'pnl-neg' : '';
     return `<tr>
-      <td style="font-weight:600">${p.symbol}</td>
+      <td style="font-weight:600">${esc(p.symbol)}</td>
       <td>${dirBadge(p.direction)}</td>
       <td>${phaseBadge(p.phase)}</td>
       <td style="font-family:var(--mono)">${fmtNum(p.entry_price, 4)}</td>
@@ -534,7 +545,7 @@ async function renderPositions() {
     const daysLeftCls= p.days_left != null && p.days_left <= 1 ? 'pnl-neg' : '';
 
     return `<tr>
-      <td style="font-weight:600">${p.symbol}</td>
+      <td style="font-weight:600">${esc(p.symbol)}</td>
       <td>${dirBadge(p.direction)}</td>
       <td>${phaseBadge(p.phase)}</td>
       <td style="font-family:var(--mono)">${fmtNum(p.entry_price, 4)}</td>
@@ -582,7 +593,7 @@ async function renderSignals() {
   const symSel = document.getElementById('sig-sym-filter');
   if (symSel && symSel.options.length <= 1 && data.symbols?.length) {
     symSel.innerHTML = '<option value="">All</option>' +
-      data.symbols.map(s => `<option value="${s}">${s}</option>`).join('');
+      data.symbols.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
     if (symFilter) symSel.value = symFilter;
   }
 
@@ -762,14 +773,14 @@ function renderSigTable() {
   tbody.innerHTML = slice.map(s => `
     <tr>
       <td style="white-space:nowrap;color:var(--text-sub)">${fmtTime(s.timestamp)}</td>
-      <td style="font-weight:600">${s.symbol}</td>
+      <td style="font-weight:600">${esc(s.symbol)}</td>
       <td>${dirBadge(s.direction)}</td>
       <td>${voteCell(s.c1)}</td><td>${voteCell(s.c2)}</td><td>${voteCell(s.c3)}</td>
       <td>${voteCell(s.c4)}</td><td>${voteCell(s.c5)}</td><td>${voteCell(s.c6)}</td>
       <td>${voteCell(s.c7)}</td><td>${voteCell(s.c8)}</td>
       <td class="${scoreClass(s.score)}" style="font-weight:600">${s.score ?? '—'}</td>
       <td>${tierBadge(s.tier)}</td>
-      <td style="color:var(--text-sub);font-size:11px">${s.regime || '—'}</td>
+      <td style="color:var(--text-sub);font-size:11px">${esc(s.regime) || '—'}</td>
       <td>${riskBadge(s.macro_risk)}</td>
     </tr>`).join('');
 
@@ -872,14 +883,14 @@ function renderTradesRows(rows) {
     return `<tr>
       <td style="white-space:nowrap;color:var(--text-sub)">${fmtTime(r.time)}</td>
       <td class="${typeClass}" style="font-weight:600;white-space:nowrap">${r.type}</td>
-      <td style="font-weight:600">${r.symbol}</td>
+      <td style="font-weight:600">${esc(r.symbol)}</td>
       <td>${dirBadge(r.direction)}</td>
       <td style="font-family:var(--mono)">${fmtNum(r.price, 4)}</td>
       <td style="font-family:var(--mono);color:var(--red)">${r.type === 'OPEN' ? stopStr : '—'}</td>
       <td style="font-family:var(--mono);color:var(--amber)">${r.type === 'OPEN' ? tpStr : '—'}</td>
       <td style="font-family:var(--mono)">${fmtNum(r.quantity, 4)}</td>
       <td class="${pnlClass(r.pnl_usd)}">${r.pnl_usd != null ? fmtUSD(r.pnl_usd) : '—'}</td>
-      <td style="color:var(--text-sub);font-size:11px">${r.reason || '—'}</td>
+      <td style="color:var(--text-sub);font-size:11px">${esc(r.reason) || '—'}</td>
       <td>${tierBadge(r.tier)}</td>
       <td style="font-family:var(--mono);color:var(--text-sub)">${r.confidence != null ? fmtNum(r.confidence, 1) : '—'}</td>
       <td style="font-family:var(--mono);color:var(--text-muted);font-size:11px">${r.trade_id ?? '—'}</td>
@@ -909,7 +920,7 @@ async function renderTrades() {
   if (symSel && symSel.options.length <= 1 && data.rows?.length) {
     const syms = [...new Set(data.rows.map(r => r.symbol).filter(Boolean))].sort();
     symSel.innerHTML = '<option value="">All</option>' +
-      syms.map(s => `<option${s===sym?' selected':''}>${s}</option>`).join('');
+      syms.map(s => `<option value="${esc(s)}"${s===sym?' selected':''}>${esc(s)}</option>`).join('');
   }
 
   tradesAllRows = data.rows || [];
@@ -1121,8 +1132,8 @@ async function renderCosts() {
     } else {
       tbody.innerHTML = [...rows].reverse().map(r => `<tr>
         <td style="white-space:nowrap;color:var(--text-sub)">${fmtTime(r.exit_time)}</td>
-        <td style="font-weight:600">${r.symbol}</td>
-        <td style="font-size:11px;color:var(--text-sub)">${r.type}</td>
+        <td style="font-weight:600">${esc(r.symbol)}</td>
+        <td style="font-size:11px;color:var(--text-sub)">${esc(r.type)}</td>
         <td class="${pnlClass(r.gross_pnl)}">${fmtUSD(r.gross_pnl)}</td>
         <td style="color:var(--red)">${fmtUSD(r.estimated_cost)}</td>
         <td class="${pnlClass(r.net_pnl)}">${fmtUSD(r.net_pnl)}</td>
@@ -1156,13 +1167,13 @@ async function renderStrategies() {
         return `<div class="strat-card ${s.is_active ? 'strat-active-card' : 'strat-inactive-card'}">
           <div class="strat-card-header">
             <div>
-              <div class="strat-name">${s.name}</div>
-              <div class="strat-version">v${s.version || '—'} &nbsp;·&nbsp; ${fmtDate(s.created_at)}</div>
+              <div class="strat-name">${esc(s.name)}</div>
+              <div class="strat-version">v${esc(s.version) || '—'} &nbsp;·&nbsp; ${fmtDate(s.created_at)}</div>
             </div>
             <span class="tier-badge ${s.is_active ? 'tier-SMALL' : 'tier-NO_TRADE'}">${s.is_active ? 'ACTIVE' : 'INACTIVE'}</span>
           </div>
-          ${s.description ? `<div class="strat-desc">${s.description}</div>` : ''}
-          ${paramsStr ? `<div class="strat-params-label">Parameters</div><pre class="strat-params">${paramsStr}</pre>` : ''}
+          ${s.description ? `<div class="strat-desc">${esc(s.description)}</div>` : ''}
+          ${paramsStr ? `<div class="strat-params-label">Parameters</div><pre class="strat-params">${esc(paramsStr)}</pre>` : ''}
         </div>`;
       }).join('');
     }
@@ -1175,11 +1186,11 @@ async function renderStrategies() {
       tbody.innerHTML = `<tr><td colspan="5">${emptyState('No strategies registered')}</td></tr>`;
     } else {
       tbody.innerHTML = data.map(s => `<tr>
-        <td style="font-weight:600">${s.name}</td>
-        <td style="font-family:var(--mono);color:var(--text-sub)">v${s.version || '—'}</td>
+        <td style="font-weight:600">${esc(s.name)}</td>
+        <td style="font-family:var(--mono);color:var(--text-sub)">v${esc(s.version) || '—'}</td>
         <td><span class="tier-badge ${s.is_active ? 'tier-SMALL' : 'tier-NO_TRADE'}">${s.is_active ? 'ACTIVE' : 'INACTIVE'}</span></td>
         <td style="color:var(--text-sub);white-space:nowrap">${fmtDate(s.created_at)}</td>
-        <td style="color:var(--text-sub);font-size:11.5px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.description || '—'}</td>
+        <td style="color:var(--text-sub);font-size:11.5px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.description) || '—'}</td>
       </tr>`).join('');
     }
   }
@@ -1228,7 +1239,7 @@ async function renderOptimizer() {
   const stratSel = document.getElementById('opt-strategy-filter');
   if (stratSel && stratSel.options.length <= 1 && data.strategies?.length) {
     stratSel.innerHTML = '<option value="">All</option>' +
-      data.strategies.map(s => `<option value="${s}"${s===stratFilter?' selected':''}>${s}</option>`).join('');
+      data.strategies.map(s => `<option value="${esc(s)}"${s===stratFilter?' selected':''}>${esc(s)}</option>`).join('');
   }
 
   const rows     = data.rows || [];
@@ -1341,7 +1352,7 @@ async function renderOptimizer() {
           ? r.oos_sharpe - r.in_sample_sharpe : null;
         return `<tr>
           <td style="white-space:nowrap;color:var(--text-sub)">${fmtDate(r.started_at)}</td>
-          <td style="font-weight:600">${r.strategy_name || '—'}</td>
+          <td style="font-weight:600">${esc(r.strategy_name) || '—'}</td>
           <td>${sharpeBadge(r.in_sample_sharpe)}</td>
           <td>
             ${sharpeBadge(r.oos_sharpe)}
@@ -1351,7 +1362,7 @@ async function renderOptimizer() {
           <td style="font-family:var(--mono)">${r.oos_trades ?? '—'}</td>
           <td style="font-family:var(--mono);color:var(--text-sub)">${r.p_value != null ? r.p_value.toFixed(4) : '—'}</td>
           <td>${resultBadge}</td>
-          <td style="font-size:11px;color:var(--text-sub);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.notes || '—'}</td>
+          <td style="font-size:11px;color:var(--text-sub);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.notes) || '—'}</td>
         </tr>`;
       }).join('');
     }
@@ -1385,12 +1396,12 @@ async function renderStatus() {
   const brokerEl = document.getElementById('st-broker-cards');
   if (brokerEl && data.brokers) {
     brokerEl.innerHTML = Object.entries(data.brokers).map(([name, b]) => {
-      const detail = name === 'ibkr' ? `${b.host}:${b.port}` : b.environment;
-      return `<div class="broker-card status-${b.status}" style="flex:1;min-width:160px">
+      const detail = name === 'ibkr' ? 'IBKR Gateway' : esc(b.environment);
+      return `<div class="broker-card status-${esc(b.status)}" style="flex:1;min-width:160px">
         <span class="status-dot"></span>
         <div>
-          <div class="bk-name">${name.toUpperCase()}</div>
-          <div class="bk-detail">${detail} · ${b.status}</div>
+          <div class="bk-name">${esc(name.toUpperCase())}</div>
+          <div class="bk-detail">${detail} · ${esc(b.status)}</div>
         </div>
       </div>`;
     }).join('');
@@ -1405,7 +1416,7 @@ async function renderStatus() {
         <span style="font-weight:600;font-size:13px">${cb.tripped ? '⚡ TRIPPED' : '✓ CLEAR'}</span>
         <span class="tier-badge ${cb.tripped ? 'tier-FULL' : 'tier-SMALL'}">${cb.tripped ? 'ACTIVE' : 'OK'}</span>
       </div>
-      ${cb.reason ? `<div style="font-size:12px;color:var(--red);margin-bottom:8px">${cb.reason}</div>` : ''}
+      ${cb.reason ? `<div style="font-size:12px;color:var(--red);margin-bottom:8px">${esc(cb.reason)}</div>` : ''}
       <div style="font-size:11.5px;color:var(--text-sub);margin-bottom:8px">
         Daily P&L: <span class="${pnlClass(cb.daily_pnl)}" style="font-family:var(--mono)">${fmtUSD(cb.daily_pnl)}</span>
         &nbsp;/&nbsp; Limit: <span style="font-family:var(--mono);color:var(--red)">-${fmtUSD(cb.daily_loss_limit)}</span>
@@ -1418,7 +1429,7 @@ async function renderStatus() {
   if (univEl) {
     univEl.innerHTML = data.active_universe?.length
       ? data.active_universe.map(u =>
-          `<div class="u-chip"><span class="u-sym">${u.symbol}</span><span class="u-meta">${u.broker} · ${u.asset_type}</span></div>`
+          `<div class="u-chip"><span class="u-sym">${esc(u.symbol)}</span><span class="u-meta">${esc(u.broker)} · ${esc(u.asset_type)}</span></div>`
         ).join('')
       : '<span style="color:var(--text-muted);font-size:13px">No active universe set</span>';
   }
@@ -1437,7 +1448,7 @@ async function renderStatus() {
       ? data.strategies.map(s => `
           <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
             <div>
-              <div style="font-weight:600;font-size:13px">${s.name} <span style="font-family:var(--mono);font-size:11px;color:var(--text-sub)">v${s.version}</span></div>
+              <div style="font-weight:600;font-size:13px">${esc(s.name)} <span style="font-family:var(--mono);font-size:11px;color:var(--text-sub)">v${esc(s.version)}</span></div>
               <div style="font-size:11px;color:var(--text-muted)">${fmtTime(s.created_at)}</div>
             </div>
             <span class="tier-badge ${s.is_active ? 'tier-SMALL' : 'tier-NO_TRADE'}">${s.is_active ? 'ACTIVE' : 'INACTIVE'}</span>
@@ -1451,8 +1462,8 @@ async function renderStatus() {
       ? data.recent_events.map(ev => `<tr>
           <td style="white-space:nowrap;color:var(--text-sub)">${fmtTime(ev.timestamp)}</td>
           <td>${evBadge(ev.event_type)}</td>
-          <td style="font-family:var(--mono);font-weight:600">${ev.symbol || '—'}</td>
-          <td style="font-size:12px;color:var(--text-sub);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ev.description || '—'}</td>
+          <td style="font-family:var(--mono);font-weight:600">${esc(ev.symbol) || '—'}</td>
+          <td style="font-size:12px;color:var(--text-sub);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ev.description) || '—'}</td>
         </tr>`).join('')
       : `<tr><td colspan="4">${emptyState('No events logged')}</td></tr>`;
   }

@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import secrets
 import socket
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
@@ -36,6 +39,38 @@ from database.models import (
 )
 
 ROOT = Path(__file__).resolve().parent
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+_DASH_USER = os.getenv("DASHBOARD_USERNAME", "")
+_DASH_PASS = os.getenv("DASHBOARD_PASSWORD", "")
+_AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
+if not _AUTH_ENABLED:
+    logger.warning("DASHBOARD_USERNAME/PASSWORD not set — dashboard is unauthenticated")
+
+_http_basic = HTTPBasic(auto_error=False)
+
+
+def _require_auth(credentials: Optional[HTTPBasicCredentials] = Depends(_http_basic)):
+    if not _AUTH_ENABLED:
+        return
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    ok = secrets.compare_digest(
+        credentials.username.encode("utf-8"), _DASH_USER.encode("utf-8")
+    ) and secrets.compare_digest(
+        credentials.password.encode("utf-8"), _DASH_PASS.encode("utf-8")
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
 
 # ── DB engine ──────────────────────────────────────────────────────────────────
 _db_url = settings.bot.database_url
@@ -61,16 +96,33 @@ def get_db():
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Trade Bot Dashboard v2", docs_url=None, redoc_url=None)
+app = FastAPI(
+    title="Trade Bot Dashboard v2",
+    docs_url=None,
+    redoc_url=None,
+    dependencies=[Depends(_require_auth)],
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[],          # block all cross-origin requests
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
 @app.middleware("http")
-async def no_cache_api(request, call_next):
+async def security_headers(request, call_next):
     response = await call_next(request)
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     return response
 
 
@@ -323,7 +375,7 @@ def api_overview():
             },
         }
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/positions ────────────────────────────────────────────────────────
@@ -537,7 +589,7 @@ def api_positions():
 
         return rows
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/signals ──────────────────────────────────────────────────────────
@@ -547,7 +599,7 @@ def api_signals(
     symbol: str = Query(""),
     tier: str = Query(""),
     tradeable_only: bool = Query(False),
-    days: int = Query(5),
+    days: int = Query(5, ge=1, le=90),
 ):
     TIER_ORDER = {"SMALL": 1, "MEDIUM": 2, "LARGE": 3, "FULL": 4}
     TRADEABLE  = {"SMALL", "MEDIUM", "LARGE", "FULL"}
@@ -596,7 +648,7 @@ def api_signals(
         all_syms = sorted({s.symbol for s in rows if s.symbol})
         return {"signals": signals, "total": len(signals), "symbols": all_syms}
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/trades ───────────────────────────────────────────────────────────
@@ -605,8 +657,8 @@ def api_signals(
 def api_trades(
     symbol: str = Query(""),
     direction: str = Query(""),
-    page: int = Query(1),
-    page_size: int = Query(50),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
 ):
     try:
         with get_db() as db:
@@ -721,7 +773,7 @@ def api_trades(
             "page": page, "page_size": page_size, "total": total, "pages": pages,
         }
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/costs ────────────────────────────────────────────────────────────
@@ -797,7 +849,7 @@ def api_costs():
             "rows": rows,
         }
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/run-optimizer ────────────────────────────────────────────────
@@ -812,7 +864,7 @@ def api_run_optimizer():
         return {"status": "ok", "message": "Optimization complete."}
     except Exception as exc:
         logger.exception("run-optimizer failed")
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+        return JSONResponse({"status": "error", "message": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/optimization ─────────────────────────────────────────────────
@@ -820,8 +872,8 @@ def api_run_optimizer():
 @app.get("/api/optimization")
 def api_optimization(
     strategy: str = Query(""),
-    page: int = Query(1),
-    page_size: int = Query(50),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
 ):
     try:
         with get_db() as db:
@@ -867,7 +919,7 @@ def api_optimization(
             "strategies": strategies_in_result,
         }
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/strategies ────────────────────────────────────────────────────
@@ -894,7 +946,7 @@ def api_strategies():
             for r in rows
         ]
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 # ── API: /api/status ───────────────────────────────────────────────────────────
@@ -983,8 +1035,6 @@ def api_status():
             "brokers": {
                 "ibkr": {
                     "status": "healthy" if ibkr_ok else "down",
-                    "host": settings.ibkr.host,
-                    "port": settings.ibkr.port,
                     "enabled": settings.ibkr.enabled,
                 },
                 "oanda": {
@@ -1027,4 +1077,4 @@ def api_status():
             ],
         }
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
