@@ -171,6 +171,7 @@ class RiskAgent:
         current_price: float,
         symbol: str,
         atr: float | None = None,
+        size_multiplier: float = 1.0,
     ) -> RiskParams | None:
         """
         Compute position sizing.
@@ -180,6 +181,10 @@ class RiskAgent:
         atr:
             ATR(14) value from 1h data. When provided, stops and TP are placed
             at ATR multiples and position size is scaled by volatility.
+        size_multiplier:
+            Additional size override (0–1.0). Applied after all other scaling.
+            Used by the orchestrator to reduce size for stronger-signal entries
+            into correlated sectors (e.g. 0.5 for a half-size override trade).
 
         Returns None if:
         - tier is NO_TRADE or WATCH
@@ -188,7 +193,10 @@ class RiskAgent:
         - any unexpected error (logged as WARNING)
         """
         try:
-            return self._compute(confidence_result, current_price, symbol, atr=atr)
+            return self._compute(
+                confidence_result, current_price, symbol, atr=atr,
+                size_multiplier=size_multiplier,
+            )
         except Exception as exc:
             logger.warning(
                 "RiskAgent.compute: unexpected error for %s — %s", symbol, exc, exc_info=True
@@ -205,6 +213,7 @@ class RiskAgent:
         current_price: float,
         symbol: str,
         atr: float | None = None,
+        size_multiplier: float = 1.0,
     ) -> RiskParams | None:
 
         tier = confidence_result.position_tier
@@ -265,6 +274,14 @@ class RiskAgent:
                     "RiskAgent: %s vol-scaled %.0f%% (atr_pct=%.2f%%)",
                     symbol, vol_scale * 100, atr_pct * 100,
                 )
+
+        # ── Step 3d: apply caller-supplied size override (e.g. 0.5 for sector override) ──
+        if size_multiplier != 1.0:
+            position_size_usd *= size_multiplier
+            logger.info(
+                "RiskAgent: %s size_multiplier=%.2f applied → $%.2f",
+                symbol, size_multiplier, position_size_usd,
+            )
 
         # ── Step 4: clamp to available cash in this broker's pool ────────
         if self._state is not None:

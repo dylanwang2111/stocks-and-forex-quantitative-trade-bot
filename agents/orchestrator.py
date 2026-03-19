@@ -959,13 +959,39 @@ class Orchestrator:
         partial_exit_symbols = {p.symbol for p in all_positions if p.partial_exit_done}
         self._correlation_guard.update_open_symbols(open_symbols, partial_exit_symbols)
         corr_allowed, corr_reason = self._correlation_guard.is_allowed(symbol)
+        size_multiplier = 1.0
         if not corr_allowed:
-            logger.info(
-                "_attempt_entry: %s blocked by CorrelationGuard — %s",
-                symbol,
-                corr_reason,
-            )
-            return
+            # Allow a half-size entry if the new signal outranks every correlated holding.
+            # e.g. new=MEDIUM vs held=SMALL → entry at 50% size is permitted.
+            _TIER_RANK = {"SMALL": 1, "MEDIUM": 2, "LARGE": 3, "FULL": 4}
+            new_rank = _TIER_RANK.get(confidence_result.position_tier.value, 0)
+            from portfolio.watchlist import are_correlated
+            corr_positions = [p for p in all_positions if are_correlated(symbol, p.symbol)]
+            if corr_positions and new_rank > 0:
+                max_held_rank = max(
+                    _TIER_RANK.get(p.position_tier, 1) for p in corr_positions
+                )
+                if new_rank > max_held_rank:
+                    size_multiplier = 0.5
+                    logger.info(
+                        "_attempt_entry: %s — stronger signal (%s > %s held correlated) "
+                        "— allowing at 50%% size",
+                        symbol,
+                        confidence_result.position_tier.value,
+                        max(p.position_tier for p in corr_positions),
+                    )
+                else:
+                    logger.info(
+                        "_attempt_entry: %s blocked by CorrelationGuard — %s",
+                        symbol, corr_reason,
+                    )
+                    return
+            else:
+                logger.info(
+                    "_attempt_entry: %s blocked by CorrelationGuard — %s",
+                    symbol, corr_reason,
+                )
+                return
 
         # ── Guard 5: PDT rule ─────────────────────────────────────────────────
         if asset_type == "stock":
@@ -1001,6 +1027,7 @@ class Orchestrator:
             current_price=current_price,
             symbol=symbol,
             atr=atr,
+            size_multiplier=size_multiplier,
         )
         if risk_params is None:
             logger.info(
