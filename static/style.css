@@ -521,6 +521,8 @@ html.dark .m-label-tag {
 /* ── Tables ─────────────────────────────────────────────────────────────────── */
 .table-wrap {
   overflow-x: auto;
+  width: 100%;
+  max-width: 100%;
 }
 table.dt {
   width: 100%;
@@ -931,10 +933,17 @@ table.dt tr:last-child td { border-bottom: none; }
   align-items: start;
   transition: grid-template-columns 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Prevent grid children from blowing past their 1fr column when table content is wide */
+/* Prevent grid children from blowing past their 1fr column when table content is wide.
+   overflow: hidden on the card would clip the scrollbar track, so we rely solely on
+   min-width:0 to constrain the grid item and let .table-wrap handle its own scroll. */
 .ov-bottom-grid > * {
   min-width: 0;
-  overflow: hidden;
+}
+/* Cards inside the overview bottom grid must not grow wider than their column */
+#ov-alloc-card,
+#ov-pos-card {
+  width: 100%;
+  box-sizing: border-box;
 }
 .ov-bottom-grid.pos-expanded {
   grid-template-columns: 1fr;
