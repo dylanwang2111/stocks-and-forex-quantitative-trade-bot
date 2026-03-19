@@ -7,7 +7,16 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=7" />
+  <style>
+    /* Table horizontal scroll — inline to bypass CSS caching */
+    .ov-bottom-grid > * { min-width: 0 !important; }
+    #ov-alloc-card,
+    #ov-pos-card { overflow: hidden !important; }
+    #ov-alloc-card .table-wrap,
+    #ov-pos-card .table-wrap,
+    #ov-pos-card .ov-pos-full-wrap { overflow-x: auto !important; display: block !important; max-width: 100% !important; }
+  </style>
   <script>
     /* Prevent flash of wrong theme — apply dark class before first paint */
     (function() {
