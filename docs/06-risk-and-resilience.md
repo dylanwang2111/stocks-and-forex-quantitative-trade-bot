@@ -93,7 +93,7 @@ Prevents holding two highly correlated positions simultaneously. Applies at **tr
 ### Rules
 
 1. **Pairwise correlation**: If symbol A is in `correlated_with` list of any currently-open position, entry is blocked.
-2. **Forex limit**: Only 1 forex position at a time (any pair).
+2. **Forex limit**: Max `MAX_FOREX` forex positions simultaneously (default 2, set via `MAX_FOREX` env var).
 
 ### Examples
 
@@ -103,9 +103,12 @@ Candidate: XOM → BLOCKED (XOM is in energy correlation group)
 Candidate: CVX → BLOCKED
 Candidate: NVDA → ALLOWED (different sector)
 
-Open position: EURUSD
-Candidate: GBPUSD → BLOCKED (forex limit: 1 position max)
-Candidate: USDJPY → BLOCKED
+Open positions: EURUSD, USDJPY (2 forex, at MAX_FOREX default)
+Candidate: AUDUSD → BLOCKED (forex limit reached)
+
+Open positions: EURUSD (1 forex)
+Candidate: USDJPY → ALLOWED (below MAX_FOREX limit)
+Candidate: GBPUSD → BLOCKED (correlated with EURUSD via blacklist)
 ```
 
 ### API
@@ -183,4 +186,4 @@ When a broker reconnects, `on_reconnect(broker)` is called on the orchestrator:
 
 ### Dashboard Integration
 
-Health status is visible in the Streamlit dashboard under the broker status section. The dashboard reads the latest `EventLog` entries to display connection history.
+Health status is visible in the dashboard under the **Status** page. The dashboard reads the latest `EventLog` entries to display connection state and history.

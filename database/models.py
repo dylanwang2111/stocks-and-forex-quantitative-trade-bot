@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session
 
@@ -33,7 +34,8 @@ class Trade(Base):
     direction = Column(String(10), nullable=False)        # long | short
     entry_price = Column(Float, nullable=False)
     exit_price = Column(Float, nullable=True)
-    quantity = Column(Float, nullable=False)
+    quantity = Column(Float, nullable=False)             # original entry quantity (never changes)
+    remaining_quantity = Column(Float, nullable=True)    # after partial close(s); NULL = full qty still open
     confidence = Column(Float, nullable=False)
     position_tier = Column(String(20), nullable=False)
     regime = Column(String(30), nullable=True)
@@ -42,6 +44,8 @@ class Trade(Base):
     entry_time = Column(DateTime, nullable=False, default=datetime.utcnow)
     exit_time = Column(DateTime, nullable=True)
     status = Column(String(20), nullable=False, default="open")  # open | closed | cancelled
+    stop_price = Column(Float, nullable=True)
+    take_profit_price = Column(Float, nullable=True)
     notes = Column(Text, nullable=True)
     signal_breakdown = Column(JSON, nullable=True)
 
@@ -135,6 +139,14 @@ def init_db(database_url: str = "sqlite:///trade_bot.db") -> None:
     """Create all tables. Safe to call multiple times (no-op if tables exist)."""
     engine = create_engine(database_url, echo=False)
     Base.metadata.create_all(engine)
+    # Migrate: add stop_price / take_profit_price columns if the table pre-dates them
+    with engine.connect() as conn:
+        for col in ("stop_price", "take_profit_price", "remaining_quantity"):
+            try:
+                conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} FLOAT"))
+                conn.commit()
+            except Exception:
+                pass  # column already exists — safe to ignore
     return engine
 
 

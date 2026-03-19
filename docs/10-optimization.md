@@ -37,14 +37,18 @@ Requires `GEMINI_API_KEY` in `.env`.
 
 ## Optimizable Parameters
 
-| Parameter | Current Default | Description |
-|-----------|----------------|-------------|
-| `MIN_CONFIDENCE` | 55 | Entry score threshold |
-| `SWING_HOLDING_DAYS` | 5 | Max hold time |
-| `ATR_SL_MULT` | 2.0 (stock), 1.5 (forex) | Stop-loss ATR multiplier |
-| `ATR_TP_MULT` | 4.0 (stock), 3.0 (forex) | Take-profit ATR multiplier |
-| `MIN_LEAD_GAP` | 10 | Bull/bear score separation |
-| `CASH_RESERVE_PCT` | 0.30 | Capital buffer fraction |
+Only three parameters are tunable per optimization cycle. All others are locked to protect capital allocation, position sizing, and signal construction.
+
+| Parameter | Env Var | Default | Range | Description |
+|-----------|---------|---------|-------|-------------|
+| `confidence_threshold` | `MIN_CONFIDENCE` | 55.0 | 55–85 | Minimum confidence score to enter a trade |
+| `atr_sl_mult` | — | 2.0 (stock), 1.5 (forex) | 1.0–4.0 | ATR multiplier for the Phase 1 hard stop-loss |
+| `atr_tp_mult` | — | 4.0 (SMALL tier, stocks) | 2.0–10.0 | ATR multiplier for the Phase 1 take-profit target (stocks only; forex uses a separate fixed table: 8–13×) |
+
+**Locked parameters** (never proposed by Gemini):
+`total_capital`, `ibkr_capital`, `oanda_capital`, `cash_reserve`, `max_positions`, `max_stocks`, `max_forex`, `max_crypto`, `risk_per_trade`, `target_atr_pct`, `swing_holding_days`, `partial_exit_fraction`, `rsi_period`, `ema_length`
+
+Changes are capped at ±20% from the current value per cycle to keep adjustments conservative.
 
 ---
 

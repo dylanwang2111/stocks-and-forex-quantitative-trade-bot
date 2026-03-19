@@ -23,20 +23,20 @@ from regime.detector import RegimeContext
 class PositionTier(Enum):
     NO_TRADE = "NO_TRADE"    # score < 45 — no signal
     WATCH    = "WATCH"       # 45–54  — monitor only, no entry
-    SMALL    = "SMALL"       # 55–69  — 25% of max position
-    MEDIUM   = "MEDIUM"      # 70–79  — 50% of max position
-    LARGE    = "LARGE"       # 80–89  — 75% of max position
-    FULL     = "FULL"        # ≥ 90   — 100% of max position
+    SMALL    = "SMALL"       # 55–59  — 35% of max position
+    MEDIUM   = "MEDIUM"      # 60–69  — 40% of max position
+    LARGE    = "LARGE"       # 70–79  — 60% of max position
+    FULL     = "FULL"        # ≥ 80   — 80% of max position
 
     def size_fraction(self) -> float:
         """Fraction of maximum position size to deploy."""
         return {
             PositionTier.NO_TRADE: 0.00,
             PositionTier.WATCH:    0.00,
-            PositionTier.SMALL:    0.25,
-            PositionTier.MEDIUM:   0.50,
-            PositionTier.LARGE:    0.75,
-            PositionTier.FULL:     1.00,
+            PositionTier.SMALL:    0.35,
+            PositionTier.MEDIUM:   0.40,
+            PositionTier.LARGE:    0.60,
+            PositionTier.FULL:     0.80,
         }[self]
 
 
@@ -83,9 +83,9 @@ class ConfidenceScorer:
 
     # Confidence thresholds — calibrated to match backtest entry at 55
     THRESHOLDS = [
-        (90, PositionTier.FULL),
-        (80, PositionTier.LARGE),
-        (70, PositionTier.MEDIUM),
+        (80, PositionTier.FULL),
+        (70, PositionTier.LARGE),
+        (60, PositionTier.MEDIUM),
         (55, PositionTier.SMALL),
         (45, PositionTier.WATCH),
     ]

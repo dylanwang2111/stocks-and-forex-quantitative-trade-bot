@@ -121,17 +121,16 @@ def run_validate(args) -> None:
 
 
 def run_dashboard(args) -> None:
-    """Launch the Streamlit monitoring dashboard."""
-    import os
-    dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.py")
-    print("  Launching Streamlit dashboard...")
-    print(f"  File: {dashboard_path}")
-    print("  Open http://localhost:8501 in your browser.")
+    """Launch the FastAPI dashboard (dashboard_v2)."""
+    print("  Launching dashboard at http://localhost:8050")
     print("  Press Ctrl+C to stop.\n")
     try:
-        subprocess.run(["streamlit", "run", dashboard_path], check=True)
+        subprocess.run(
+            ["uvicorn", "dashboard_v2:app", "--host", "0.0.0.0", "--port", "8050"],
+            check=True,
+        )
     except FileNotFoundError:
-        print("ERROR: 'streamlit' not found. Install it with: pip install streamlit")
+        print("ERROR: 'uvicorn' not found. Run: pip install uvicorn[standard]")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n  Dashboard stopped.")

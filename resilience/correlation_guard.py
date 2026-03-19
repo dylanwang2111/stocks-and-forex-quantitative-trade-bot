@@ -2,7 +2,7 @@
 resilience/correlation_guard.py
 
 Prevents opening a new position if it would create a correlated pair or
-violate the single-forex-at-a-time rule.
+exceed the maximum number of simultaneous forex positions.
 """
 from __future__ import annotations
 
@@ -19,9 +19,11 @@ class CorrelationGuard:
 
     Rules enforced:
     1. Never hold two symbols that appear in CORRELATION_BLACKLIST simultaneously.
-    2. Never hold more than 1 forex position simultaneously (EUR/USD and GBP/USD
-       are both forex — either counts).
+    2. Never hold more than MAX_FOREX forex positions simultaneously.
     """
+
+    MAX_FOREX   = 4  # maximum simultaneous forex positions
+    MAX_CRYPTO  = 2  # maximum simultaneous crypto positions
 
     def __init__(self, open_symbols: list[str] | None = None) -> None:
         """
@@ -57,7 +59,7 @@ class CorrelationGuard:
         Checks performed (in order):
         1. Candidate is already open → blocked.
         2. Candidate is correlated with any open symbol (via CORRELATION_BLACKLIST) → blocked.
-        3. Candidate is a forex instrument AND we already hold a forex position → blocked.
+        3. Candidate is a forex instrument AND open forex count >= MAX_FOREX (3) → blocked.
         """
         # ── Check 1: duplicate position ────────────────────────────────────────
         if candidate_symbol in self._open_symbols:
@@ -74,27 +76,53 @@ class CorrelationGuard:
                 logger.warning("CorrelationGuard blocked %s: %s", candidate_symbol, reason)
                 return False, reason
 
-        # ── Check 3: max 1 forex position ──────────────────────────────────────
+        # ── Check 3: max forex positions ───────────────────────────────────────
         try:
             candidate_inst = get_instrument(candidate_symbol)
             if candidate_inst.asset_type == "forex":
+                forex_count = 0
                 for open_sym in self._open_symbols:
                     try:
                         open_inst = get_instrument(open_sym)
                         if open_inst.asset_type == "forex":
-                            reason = (
-                                f"already hold forex position {open_sym}"
-                                " — max 1 forex simultaneously"
-                            )
-                            logger.warning(
-                                "CorrelationGuard blocked %s: %s", candidate_symbol, reason
-                            )
-                            return False, reason
+                            forex_count += 1
                     except KeyError:
-                        # Unknown open symbol — skip rather than crash
                         pass
+                if forex_count >= self.MAX_FOREX:
+                    reason = (
+                        f"already hold {forex_count} forex position(s)"
+                        f" — max {self.MAX_FOREX} simultaneously"
+                    )
+                    logger.warning(
+                        "CorrelationGuard blocked %s: %s", candidate_symbol, reason
+                    )
+                    return False, reason
         except KeyError:
             # Unknown candidate symbol — skip the forex check
+            pass
+
+        # ── Check 4: max crypto positions ──────────────────────────────────────
+        try:
+            candidate_inst = get_instrument(candidate_symbol)
+            if candidate_inst.asset_type == "crypto":
+                crypto_count = 0
+                for open_sym in self._open_symbols:
+                    try:
+                        open_inst = get_instrument(open_sym)
+                        if open_inst.asset_type == "crypto":
+                            crypto_count += 1
+                    except KeyError:
+                        pass
+                if crypto_count >= self.MAX_CRYPTO:
+                    reason = (
+                        f"already hold {crypto_count} crypto position(s)"
+                        f" — max {self.MAX_CRYPTO} simultaneously"
+                    )
+                    logger.warning(
+                        "CorrelationGuard blocked %s: %s", candidate_symbol, reason
+                    )
+                    return False, reason
+        except KeyError:
             pass
 
         logger.debug("CorrelationGuard allowed %s", candidate_symbol)

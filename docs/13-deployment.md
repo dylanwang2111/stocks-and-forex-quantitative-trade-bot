@@ -108,7 +108,7 @@ docker compose up -d tradebot
 
 # Dashboard
 docker compose up -d dashboard
-# Open http://your-server:8501
+# Open http://your-server:8050
 
 # View logs
 docker compose logs -f tradebot
@@ -137,10 +137,10 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "8501:8501"
+      - "8050:8050"
     volumes:
       - ./trade_bot.db:/app/trade_bot.db
-    command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+    command: python -m uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050
 ```
 
 ### Dockerfile

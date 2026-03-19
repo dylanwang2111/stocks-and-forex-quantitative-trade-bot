@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TradeBot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script>
+    /* Prevent flash of wrong theme — apply dark class before first paint */
+    (function() {
+      if (localStorage.getItem('tradebot-theme') === 'dark')
+        document.documentElement.classList.add('dark');
+    })();
+  </script>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TOP NAV                                                                     -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<header id="topnav">
+  <div class="topnav-brand">
+    <svg class="brand-mark" width="20" height="20" viewBox="0 0 20 20" fill="none">
+      <path d="M10 2L18 7V13L10 18L2 13V7L10 2Z" stroke="currentColor" stroke-width="1.5" fill="none"/>
+      <path d="M10 6L14 8.5V13L10 15.5L6 13V8.5L10 6Z" fill="currentColor" opacity="0.15"/>
+      <circle cx="10" cy="10" r="1.5" fill="currentColor"/>
+    </svg>
+    <span class="brand-name">TradeBot</span>
+  </div>
+
+  <nav class="topnav-links" id="sidebar-nav">
+    <a class="nav-link active" data-page="overview">Overview</a>
+    <a class="nav-link" data-page="positions">Positions</a>
+    <a class="nav-link" data-page="signals">Signals</a>
+    <a class="nav-link" data-page="trades">Trade Ledger</a>
+    <a class="nav-link" data-page="costs">Costs</a>
+    <a class="nav-link" data-page="strategies">Strategy Registry</a>
+    <a class="nav-link" data-page="optimizer">Optimizer</a>
+    <a class="nav-link" data-page="status">Bot Status</a>
+  </nav>
+
+  <div class="topnav-meta">
+    <div id="mode-pill" class="mode-pill">PAPER</div>
+    <div class="upd-group">
+      <span class="upd-time" id="last-update">—</span>
+      <div class="pulse-dot" id="pulse-dot"></div>
+    </div>
+    <!-- Settings -->
+    <div class="settings-wrap">
+      <button class="settings-btn" id="settings-btn" title="Settings" aria-label="Settings">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <circle cx="7" cy="7" r="2" stroke="currentColor" stroke-width="1.3"/>
+          <path d="M7 1v1.5M7 11.5V13M1 7h1.5M11.5 7H13M2.93 2.93l1.06 1.06M10.01 10.01l1.06 1.06M2.93 11.07l1.06-1.06M10.01 3.99l1.06-1.06" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div class="settings-panel" id="settings-panel">
+        <div class="sp-heading">Preferences</div>
+        <div class="sp-row">
+          <div class="sp-label">
+            <span class="sp-l-name">Appearance</span>
+            <span class="sp-l-sub">Dark mode</span>
+          </div>
+          <button class="dm-toggle" id="dm-toggle" aria-label="Toggle dark mode">
+            <span class="dm-track"><span class="dm-thumb"></span></span>
+            <span class="dm-icon" id="dm-icon">☽</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- CONTENT                                                                     -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<main id="content">
+
+  <!-- ── Page: Overview ─────────────────────────────────────────────────── -->
+  <section id="page-overview">
+    <div class="page-header">
+      <h1>Overview</h1>
+      <div class="sub" id="ov-snapshot-time">Loading…</div>
+    </div>
+
+    <div class="metrics-row" id="ov-metrics">
+      <div class="metric-card accent-cyan">
+        <div class="m-label">Equity <span class="m-label-tag">MTM</span></div>
+        <div class="m-value" id="ov-equity">—</div>
+        <div class="m-delta" id="ov-equity-delta">—</div>
+      </div>
+      <div class="metric-card accent-gold">
+        <div class="m-label">Realized P&amp;L</div>
+        <div class="m-value" id="ov-realized">—</div>
+        <div class="m-delta" id="ov-daily-pnl">today —</div>
+      </div>
+      <div class="metric-card accent-amber">
+        <div class="m-label">Unrealized P&amp;L</div>
+        <div class="m-value" id="ov-unrealized">—</div>
+        <div class="m-delta" id="ov-unrealized-sub">open positions</div>
+      </div>
+      <div class="metric-card accent-green">
+        <div class="m-label">Win Rate</div>
+        <div class="m-value" id="ov-winrate">—</div>
+        <div class="m-delta" id="ov-ntrades">— trades</div>
+      </div>
+      <div class="metric-card accent-purple">
+        <div class="m-label">Open Positions</div>
+        <div class="m-value" id="ov-openpos">—</div>
+        <div class="m-delta" id="ov-drawdown">drawdown —</div>
+      </div>
+      <div class="metric-card">
+        <div class="m-label">PDT Remaining</div>
+        <div class="m-value" id="ov-pdt">—</div>
+        <div class="m-delta" id="ov-pdt-sub">rolling 5d</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><div class="ct-accent"></div> Equity Curve</div>
+      <div class="chart-wrap" style="height:220px">
+        <canvas id="equity-chart"></canvas>
+        <button class="chart-reset-btn" id="reset-equity-chart" onclick="resetZoom('equity-chart')" title="Reset zoom">Reset zoom</button>
+      </div>
+    </div>
+
+    <div class="ov-bottom-grid" id="ov-bottom-grid">
+      <div class="card" id="ov-alloc-card">
+        <div class="card-title"><div class="ct-accent"></div> Capital Allocation</div>
+        <div class="table-wrap">
+          <table class="dt" id="ov-alloc-table">
+            <thead><tr>
+              <th>Broker</th><th>Pool</th><th>Deployed</th><th>Available</th><th>Util %</th><th>Pos</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card ov-pos-card" id="ov-pos-card">
+        <div class="card-title">
+          <div class="ct-accent"></div>
+          Open Positions
+          <button class="ov-expand-btn" id="ov-pos-expand-btn" onclick="toggleOvPositions()" title="Expand to full view">
+            <svg class="expand-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M10 2h4v4M6 14H2v-4M14 10v4h-4M2 6V2h4"/>
+            </svg>
+            <span class="expand-label">View full</span>
+          </button>
+        </div>
+        <!-- Mini table: compact 8-col overview -->
+        <div class="table-wrap" id="ov-pos-mini">
+          <table class="dt" id="ov-open-table">
+            <thead><tr>
+              <th>Symbol</th><th>Dir</th><th>Entry</th><th>Current</th><th>To Stop%</th><th>To TP%</th><th>Unreal P&amp;L</th><th>Phase</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <!-- Full table: all 16 cols, shown when expanded -->
+        <div class="table-wrap ov-pos-full-wrap" id="ov-pos-full">
+          <table class="dt" id="ov-open-table-full">
+            <thead><tr>
+              <th>Symbol</th>
+              <th>Dir</th>
+              <th>Phase</th>
+              <th>Entry</th>
+              <th>Current</th>
+              <th>Stop</th>
+              <th>Target</th>
+              <th>To Stop%</th>
+              <th>To TP%</th>
+              <th>TP Progress</th>
+              <th>Unreal P&amp;L</th>
+              <th>Qty</th>
+              <th>Held</th>
+              <th>Left</th>
+              <th>Tier</th>
+              <th>Conf</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Page: Positions ────────────────────────────────────────────────── -->
+  <section id="page-positions" style="display:none">
+    <div class="page-header">
+      <h1>Open Positions</h1>
+      <div class="sub">Stop / TP levels, phase status, and time remaining</div>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table class="dt" id="pos-table">
+          <thead><tr>
+            <th>Symbol</th>
+            <th>Dir</th>
+            <th>Phase</th>
+            <th>Entry</th>
+            <th>Current</th>
+            <th>Stop</th>
+            <th>Target</th>
+            <th>To Stop%</th>
+            <th>To TP%</th>
+            <th>TP Progress</th>
+            <th>Unreal P&amp;L</th>
+            <th>Qty</th>
+            <th>Held</th>
+            <th>Left</th>
+            <th>Tier</th>
+            <th>Conf</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="legend-bar">
+      <b>Phase 1</b>: hard stop only &nbsp;·&nbsp;
+      <b>Phase 2 — past TP</b>: trailing activating &nbsp;·&nbsp;
+      <b>Phase 2 — trailing</b>: trailing stop live, 50% already closed &nbsp;·&nbsp;
+      <b>To Stop%</b>: positive = not yet hit &nbsp;·&nbsp;
+      <b>TP Prog &gt; 100%</b>: price past original target
+    </div>
+  </section>
+
+  <!-- ── Page: Signals ──────────────────────────────────────────────────── -->
+  <section id="page-signals" style="display:none">
+    <div class="page-header">
+      <h1>Signal Board</h1>
+      <div class="sub">Last 5 days of scan cycles — cat1–cat8 votes, confidence score, tier</div>
+    </div>
+
+    <div class="filters-row">
+      <div class="filter-group">
+        <label>Symbol</label>
+        <select id="sig-sym-filter"><option value="">All</option></select>
+      </div>
+      <div class="filter-group">
+        <label>Min Tier</label>
+        <select id="sig-tier-filter">
+          <option value="">All</option>
+          <option value="SMALL">SMALL+</option>
+          <option value="MEDIUM">MEDIUM+</option>
+          <option value="LARGE">LARGE+</option>
+          <option value="FULL">FULL only</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>&nbsp;</label>
+        <label class="cb-wrap">
+          <input type="checkbox" id="sig-tradeable-only" />
+          <span>Tradeable only</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="card sdist-card">
+      <div class="sdist-header">
+        <div class="card-title" style="margin-bottom:0"><div class="ct-accent"></div> Score Distribution</div>
+        <div class="sdist-stats-strip">
+          <div class="sdist-stat">
+            <span class="sdist-label">Signals</span>
+            <span class="sdist-val" id="sdist-total">—</span>
+          </div>
+          <div class="sdist-sep"></div>
+          <div class="sdist-stat">
+            <span class="sdist-label">Mean</span>
+            <span class="sdist-val" id="sdist-mean">—</span>
+          </div>
+          <div class="sdist-sep"></div>
+          <div class="sdist-stat">
+            <span class="sdist-label">Tradeable</span>
+            <span class="sdist-val" id="sdist-tradeable">—</span>
+          </div>
+          <div class="sdist-sep"></div>
+          <div class="sdist-stat">
+            <span class="sdist-label">Top Symbol</span>
+            <span class="sdist-val" id="sdist-top">—</span>
+          </div>
+        </div>
+      </div>
+      <div class="chart-wrap" style="height:190px; margin-top:14px">
+        <canvas id="score-dist-chart"></canvas>
+      </div>
+      <div class="sdist-legend">
+        <span class="sdist-zone sdist-z-muted">NO TRADE</span>
+        <span class="sdist-zone sdist-z-amber">SMALL ≥55</span>
+        <span class="sdist-zone sdist-z-navy">MED ≥65</span>
+        <span class="sdist-zone sdist-z-green">LARGE ≥75</span>
+        <span class="sdist-zone sdist-z-full">FULL ≥85</span>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div class="table-wrap">
+        <table class="dt" id="sig-table">
+          <thead><tr>
+            <th>Time</th><th>Symbol</th><th>Dir</th>
+            <th data-tip="Trend Direction">C1</th>
+            <th data-tip="Trend Strength">C2</th>
+            <th data-tip="Momentum">C3</th>
+            <th data-tip="Volatility Band">C4</th>
+            <th data-tip="Volume OBV">C5</th>
+            <th data-tip="Price Structure">C6</th>
+            <th data-tip="Multi-Timeframe (±2)">C7</th>
+            <th data-tip="Macro / News">C8</th>
+            <th>Score</th><th>Tier</th><th>Regime</th><th>Macro Risk</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div style="padding:12px 16px; border-top:1px solid var(--border)">
+        <div id="sig-pagination" class="pagination"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Page: Trade Ledger ─────────────────────────────────────────────── -->
+  <section id="page-trades" style="display:none">
+    <div class="page-header">
+      <h1>Trade Ledger</h1>
+      <div class="sub">All entries, partial closes, and full closes</div>
+    </div>
+
+    <div class="metrics-row" style="margin-bottom:16px" id="trades-summary-row">
+      <div class="metric-card accent-gold">
+        <div class="m-label">Realized P&amp;L</div>
+        <div class="m-value" id="tr-realized">—</div>
+      </div>
+      <div class="metric-card accent-green">
+        <div class="m-label">Win Rate</div>
+        <div class="m-value" id="tr-winrate">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="m-label">Full Closes</div>
+        <div class="m-value" id="tr-closes">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="m-label">Partial Closes</div>
+        <div class="m-value" id="tr-partials">—</div>
+      </div>
+    </div>
+
+    <div class="filters-row">
+      <div class="filter-group">
+        <label>Symbol</label>
+        <select id="tr-sym-filter"><option value="">All</option></select>
+      </div>
+      <div class="filter-group">
+        <label>Direction</label>
+        <select id="tr-dir-filter">
+          <option value="">All</option>
+          <option value="long">Long</option>
+          <option value="short">Short</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Type</label>
+        <select id="tr-type-filter">
+          <option value="">All</option>
+          <option value="OPEN">Open</option>
+          <option value="PARTIAL">Partial Close</option>
+          <option value="CLOSE">Full Close</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><div class="ct-accent"></div> Cumulative Realized P&amp;L</div>
+      <div class="chart-wrap" style="height:180px">
+        <canvas id="trades-cum-chart"></canvas>
+        <button class="chart-reset-btn" id="reset-trades-cum-chart" onclick="resetZoom('trades-cum-chart')" title="Reset zoom">Reset zoom</button>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div class="table-wrap">
+        <table class="dt sortable" id="trades-table">
+          <thead>
+            <tr id="trades-sort-row">
+              <th data-col="time">Time <span class="sort-icon">↕</span></th>
+              <th data-col="type">Type <span class="sort-icon">↕</span></th>
+              <th data-col="symbol">Symbol <span class="sort-icon">↕</span></th>
+              <th data-col="direction">Dir <span class="sort-icon">↕</span></th>
+              <th data-col="price">Price <span class="sort-icon">↕</span></th>
+              <th data-col="stop_price">Stop <span class="sort-icon">↕</span></th>
+              <th data-col="take_profit_price">TP <span class="sort-icon">↕</span></th>
+              <th data-col="quantity">Qty <span class="sort-icon">↕</span></th>
+              <th data-col="pnl_usd">P&amp;L <span class="sort-icon">↕</span></th>
+              <th data-col="reason">Reason</th>
+              <th data-col="tier">Tier <span class="sort-icon">↕</span></th>
+              <th data-col="confidence">Conf <span class="sort-icon">↕</span></th>
+              <th data-col="trade_id">ID <span class="sort-icon">↕</span></th>
+            </tr>
+            <tr id="trades-filter-row" class="filter-row">
+              <td><input class="col-filter" data-col="time" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="type" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="symbol" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="direction" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="price" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="stop_price" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="take_profit_price" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="quantity" placeholder="filter…"/></td>
+              <td><input class="col-filter" data-col="pnl_usd" placeholder="filter…"/></td>
+              <td></td>
+              <td><input class="col-filter" data-col="tier" placeholder="filter…"/></td>
+              <td></td>
+              <td></td>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="pagination" id="trades-pagination"></div>
+  </section>
+
+  <!-- ── Page: Costs ────────────────────────────────────────────────────── -->
+  <section id="page-costs" style="display:none">
+    <div class="page-header">
+      <h1>Cost Analysis</h1>
+      <div class="sub">Gross P&amp;L vs net P&amp;L after estimated fees &amp; slippage (includes partial closes)</div>
+    </div>
+
+    <div class="metrics-row">
+      <div class="metric-card accent-gold">
+        <div class="m-label">Gross P&amp;L</div>
+        <div class="m-value" id="cost-gross">—</div>
+      </div>
+      <div class="metric-card accent-red">
+        <div class="m-label">Total Costs</div>
+        <div class="m-value" id="cost-total">—</div>
+        <div class="m-delta" style="font-size:10px">stock 0.15% · forex 0.08%</div>
+      </div>
+      <div class="metric-card accent-green">
+        <div class="m-label">Net P&amp;L</div>
+        <div class="m-value" id="cost-net">—</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> Gross vs Net per Trade</div>
+        <div class="chart-wrap" style="height:200px">
+          <canvas id="cost-line-chart"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> Cumulative Cost</div>
+        <div class="chart-wrap" style="height:200px">
+          <canvas id="cost-area-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div class="table-wrap">
+        <table class="dt" id="cost-table">
+          <thead><tr>
+            <th>Time</th><th>Symbol</th><th>Type</th>
+            <th>Gross P&amp;L</th><th>Est. Cost</th><th>Net P&amp;L</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Page: Strategy Registry ────────────────────────────────────────── -->
+  <section id="page-strategies" style="display:none">
+    <div class="page-header">
+      <h1>Strategy Registry</h1>
+      <div class="sub">Registered trading strategies, versions, and parameter configurations</div>
+    </div>
+
+    <div class="metrics-row" style="margin-bottom:16px">
+      <div class="metric-card accent-cyan">
+        <div class="m-label">Total Strategies</div>
+        <div class="m-value" id="strat-total">—</div>
+      </div>
+      <div class="metric-card accent-green">
+        <div class="m-label">Active</div>
+        <div class="m-value" id="strat-active">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="m-label">Inactive</div>
+        <div class="m-value" id="strat-inactive">—</div>
+      </div>
+    </div>
+
+    <div id="strat-cards-grid" class="strat-grid"></div>
+
+    <div class="card" style="padding:0; overflow:hidden; margin-top:20px">
+      <div style="padding:20px 24px 12px; border-bottom:1px solid var(--border)">
+        <div class="card-title" style="margin-bottom:0"><div class="ct-accent"></div> All Strategies</div>
+      </div>
+      <div class="table-wrap">
+        <table class="dt" id="strat-table">
+          <thead><tr>
+            <th>Name</th><th>Version</th><th>Status</th><th>Created</th><th>Description</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Page: Optimizer ────────────────────────────────────────────────── -->
+  <section id="page-optimizer" style="display:none">
+    <div class="page-header">
+      <h1>Optimizer</h1>
+      <div class="sub">Walk-forward optimization cycles — in-sample vs out-of-sample Sharpe</div>
+    </div>
+
+    <div class="metrics-row" style="margin-bottom:16px">
+      <div class="metric-card accent-cyan">
+        <div class="m-label">Total Cycles</div>
+        <div class="m-value" id="opt-total">—</div>
+      </div>
+      <div class="metric-card accent-green">
+        <div class="m-label">Accepted</div>
+        <div class="m-value" id="opt-accepted">—</div>
+      </div>
+      <div class="metric-card accent-red">
+        <div class="m-label">Rejected</div>
+        <div class="m-value" id="opt-rejected">—</div>
+      </div>
+      <div class="metric-card accent-gold">
+        <div class="m-label">Avg OOS Sharpe</div>
+        <div class="m-value" id="opt-avg-sharpe">—</div>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:20px">
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> In-Sample vs OOS Sharpe</div>
+        <div class="chart-wrap" style="height:200px">
+          <canvas id="opt-sharpe-chart"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> Acceptance Rate by Strategy</div>
+        <div class="chart-wrap" style="height:200px">
+          <canvas id="opt-accept-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="filters-row">
+      <div class="filter-group">
+        <label>Strategy</label>
+        <select id="opt-strategy-filter"><option value="">All</option></select>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div class="table-wrap">
+        <table class="dt" id="opt-table">
+          <thead><tr>
+            <th>Started</th><th>Strategy</th><th>IS Sharpe</th><th>OOS Sharpe</th>
+            <th>IS Trades</th><th>OOS Trades</th><th>p-value</th><th>Result</th><th>Notes</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="pagination" id="opt-pagination"></div>
+
+    <div class="card" style="margin-top:20px">
+      <div class="card-title"><div class="ct-accent"></div> Run Optimization</div>
+      <div style="color:var(--text-sub);font-size:12px;margin-bottom:14px">
+        Requires ≥50 closed trades. Runs the full 7-step walk-forward pipeline.
+      </div>
+      <button class="run-opt-btn" id="run-opt-btn" onclick="runOptimizer()">
+        Run Optimizer Now
+      </button>
+      <div id="run-opt-status" style="margin-top:10px;font-family:var(--mono);font-size:12px"></div>
+    </div>
+  </section>
+
+  <!-- ── Page: Status ───────────────────────────────────────────────────── -->
+  <section id="page-status" style="display:none">
+    <div class="page-header">
+      <h1>Bot Status</h1>
+      <div class="sub" id="st-bot-line">Checking…</div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:20px">
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> Broker Health</div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap" id="st-broker-cards"></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> Circuit Breaker</div>
+        <div id="st-cb-card"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-title"><div class="ct-accent"></div> Active Universe</div>
+      <div class="universe-chips" id="st-universe"></div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:20px">
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> Scheduler</div>
+        <table class="dt" id="st-sched-table">
+          <thead><tr><th>Job</th><th>Schedule</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-title"><div class="ct-accent"></div> Strategy Registry (Summary)</div>
+        <div id="st-strategies"></div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div style="padding:20px 24px 12px; border-bottom:1px solid var(--border)">
+        <div class="card-title" style="margin-bottom:0"><div class="ct-accent"></div> Recent Events</div>
+      </div>
+      <div class="table-wrap">
+        <table class="dt" id="st-events-table">
+          <thead><tr><th>Time</th><th>Type</th><th>Symbol</th><th>Description</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

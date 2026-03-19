@@ -53,7 +53,7 @@ main.py                         ← Entry point
 ├── notifications/telegram.py   ← Telegram alerts
 ├── backtesting/                ← Backtest + walk-forward engine
 ├── optimization/               ← LLM-guided parameter tuning
-├── dashboard.py                ← Streamlit monitoring UI
+├── dashboard_v2.py             ← FastAPI SPA monitoring dashboard (port 8050)
 └── validate.py                 ← Backtest CLI
 ```
 

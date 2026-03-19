@@ -121,6 +121,31 @@ class TelegramNotifier:
         )
         self.send(msg)
 
+    def notify_partial_close(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        exit_price: float,
+        closed_qty: float,
+        pnl: float,
+    ) -> None:
+        pnl_pct = abs(exit_price - entry_price) / entry_price * 100
+        if direction == "long":
+            pnl_pct = (exit_price - entry_price) / entry_price * 100
+        else:
+            pnl_pct = (entry_price - exit_price) / entry_price * 100
+        emoji = "💰" if pnl >= 0 else "❌"
+        sign = "+" if pnl >= 0 else ""
+        msg = (
+            f"{emoji} PARTIAL CLOSE 50%  [phase-2]\n"
+            f"{symbol}  {'LONG' if direction == 'long' else 'SHORT'}\n"
+            f"Entry → Exit:  ${entry_price:,.4f} → ${exit_price:,.4f}\n"
+            f"Closed Qty:  {closed_qty:g}\n"
+            f"P&L:  {sign}${pnl:.2f}  ({sign}{pnl_pct:.2f}%)"
+        )
+        self.send(msg)
+
     def notify_circuit_breaker(self, reason: str) -> None:
         msg = (
             f"⚡ CIRCUIT BREAKER TRIPPED\n"
@@ -129,17 +154,31 @@ class TelegramNotifier:
         )
         self.send(msg)
 
-    def notify_portfolio_updated(self, instruments: list) -> None:
+    def notify_portfolio_updated(
+        self,
+        instruments: list,
+        open_symbols: list[str] | None = None,
+    ) -> None:
+        """
+        instruments:  new active universe (Instrument objects)
+        open_symbols: symbols of currently open positions (to flag held-over positions)
+        """
+        new_symbols = {i.symbol for i in instruments}
         stocks  = [i.symbol for i in instruments if i.asset_type == "stock"]
         forex   = [i.symbol for i in instruments if i.asset_type == "forex"]
         crypto  = [i.symbol for i in instruments if i.asset_type == "crypto"]
-        lines   = ["🔄 PORTFOLIO UPDATED"]
+        lines   = [f"🔄 PORTFOLIO UPDATED  ({len(instruments)} instruments)"]
         if stocks:
             lines.append(f"Stocks ({len(stocks)}): {', '.join(stocks)}")
         if forex:
             lines.append(f"Forex  ({len(forex)}): {', '.join(forex)}")
         if crypto:
             lines.append(f"Crypto ({len(crypto)}): {', '.join(crypto)}")
+        # Show open positions that are no longer in the new universe
+        if open_symbols:
+            held_over = [s for s in open_symbols if s not in new_symbols]
+            if held_over:
+                lines.append(f"⚠️ Holding until exit: {', '.join(held_over)}")
         self.send("\n".join(lines))
 
     def notify_pdt_warning(self, used: int, limit: int) -> None:
@@ -188,20 +227,25 @@ class TelegramNotifier:
         unrealized_pnl: float = 0.0,
         deployed: float = 0.0,
         available_cash: float = 0.0,
+        prices_missing: int = 0,
+        total_realized: float = 0.0,
     ) -> None:
-        total_pnl = daily_pnl + unrealized_pnl
+        total_pnl = total_realized + unrealized_pnl
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
         def _fmt(v: float) -> str:
             return f"+${v:.2f}" if v >= 0 else f"-${abs(v):.2f}"
+        unrealized_line = _fmt(unrealized_pnl)
+        if prices_missing > 0:
+            unrealized_line += f"  ⚠️ {prices_missing} price(s) unavailable"
         msg = (
             f"{pnl_emoji} HOURLY SUMMARY  [{trading_mode.upper()}]\n"
             f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
             f"Open positions: {open_positions}\n"
             f"Deployed:       ${deployed:.2f}\n"
             f"Available cash: ${available_cash:.2f}\n"
-            f"Realized P&L:   {_fmt(daily_pnl)}\n"
-            f"Unrealized P&L: {_fmt(unrealized_pnl)}\n"
-            f"Total P&L:      {_fmt(total_pnl)}\n"
+            f"Today P&L:      {_fmt(daily_pnl)}\n"
+            f"All-time P&L:   {_fmt(total_realized)}\n"
+            f"Unrealized P&L: {unrealized_line}\n"
             f"Total equity:   ${total_equity:.2f}"
         )
         self.send(msg)

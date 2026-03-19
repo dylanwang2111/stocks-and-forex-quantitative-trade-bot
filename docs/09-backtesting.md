@@ -85,8 +85,8 @@ The live signals are adapted for daily bars:
 
 - Entry: Score ≥ MIN_CONFIDENCE (55) and direction agreement
 - Stop-loss: 2× ATR (stocks) or 1.5× ATR (forex)
-- Take-profit: 4× ATR (stocks) or 3× ATR (forex)
-- Max holding: SWING_HOLDING_DAYS (5)
+- Take-profit: tier-based — stocks: SMALL 4×, MEDIUM 5×, LARGE 6×, FULL 6.5×; forex: SMALL 8×, MEDIUM 10×, LARGE 12×, FULL 13× (higher because forex 1h ATR% is ~10–20× smaller)
+- Max holding: `SWING_HOLDING_DAYS` calendar days (default 7)
 
 ### Short Selling
 
@@ -118,7 +118,7 @@ Track:
 
 ### Features
 
-- **ATR-based stops**: Same multipliers as live (2×/4× stocks, 1.5×/3× forex)
+- **ATR-based stops**: Same multipliers as live — stocks: 2× SL / 4× TP; forex: 1.5× SL / 10× TP (portfolio backtest uses the MEDIUM tier as a flat default)
 - **Correlation guards**: Energy cluster, gold cluster, forex limit
 - **Sector caps**: Max 2 instruments per sector in backtest universe
 - **Short selling**: When EMA50 < EMA200 (bear regime)
@@ -126,9 +126,9 @@ Track:
 
 ### Trailing Stops
 
-The portfolio backtest implements trailing stops not present in the live system:
-- Long: Track peak price, stop trails at `peak - trail_atr × ATR`
-- Short: Track trough price, stop trails at `trough + trail_atr × ATR`
+The portfolio backtest implements a simplified trailing stop (single-phase). The live system uses a two-phase model (see [Exit Strategy](15-exit-strategy.md)):
+- Long: track peak price, stop trails at `peak − trail_atr × ATR`
+- Short: track trough price, stop trails at `trough + trail_atr × ATR`
 
 ### Metrics
 

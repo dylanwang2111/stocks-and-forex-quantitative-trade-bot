@@ -9,7 +9,7 @@ Scores all instruments in CANDIDATE_POOL on 30 days of daily bars using:
 
 Selects:
   - Top MAX_STOCKS stocks (correlation-aware greedy)
-  - Top MAX_FOREX forex (EURUSD always force-included as anchor)
+  - Top MAX_FOREX forex (by score)
 
 Calls set_active_universe() to swap the live universe atomically.
 """
@@ -28,8 +28,6 @@ from portfolio.watchlist import CANDIDATE_POOL, Instrument, set_active_universe
 from agents.portfolio_agent import MacroContext, _SECTOR, _fetch_macro_context_shared
 
 logger = logging.getLogger(__name__)
-
-_EURUSD_ANCHOR = "EURUSD"
 
 # Fundamental thresholds (same as PortfolioAgent)
 _PE_GOOD_MAX  = 30
@@ -53,9 +51,10 @@ class PreScreenAgent:
     Macro context is fetched once and shared across all instruments.
     """
 
-    MAX_STOCKS: int = settings.bot.max_stocks
-    MAX_FOREX: int  = settings.bot.max_forex
-    MIN_BARS: int   = 20
+    MAX_STOCKS: int  = settings.bot.max_stocks
+    MAX_FOREX: int   = settings.bot.max_forex
+    MAX_CRYPTO: int  = settings.bot.max_crypto
+    MIN_BARS: int    = 20
 
     def _bulk_fetch(self) -> dict[str, pd.DataFrame]:
         result = self._bulk_fetch_yfinance()
@@ -201,6 +200,7 @@ class PreScreenAgent:
 
         scored_stocks: list[tuple[float, Instrument]] = []
         scored_forex:  list[tuple[float, Instrument]] = []
+        scored_crypto: list[tuple[float, Instrument]] = []
 
         for instrument in CANDIDATE_POOL:
             df = prefetched.get(instrument.symbol)
@@ -211,11 +211,14 @@ class PreScreenAgent:
             logger.debug("  %s: score=%.2f", instrument.symbol, score)
             if instrument.asset_type == "stock":
                 scored_stocks.append((score, instrument))
+            elif instrument.asset_type == "crypto":
+                scored_crypto.append((score, instrument))
             else:
                 scored_forex.append((score, instrument))
 
         scored_stocks.sort(key=lambda t: t[0], reverse=True)
         scored_forex.sort(key=lambda t: t[0], reverse=True)
+        scored_crypto.sort(key=lambda t: t[0], reverse=True)
 
         # Greedy correlation-aware stock selection
         selected_stocks: list[Instrument] = []
@@ -230,42 +233,41 @@ class PreScreenAgent:
             selected_stocks.append(inst)
             selected_symbols.add(inst.symbol)
 
-        # Forex: force-include EURUSD anchor
-        eurusd_instrument: Instrument | None = None
-        other_forex: list[Instrument] = []
-
-        for _score, inst in scored_forex:
-            if inst.symbol == _EURUSD_ANCHOR:
-                eurusd_instrument = inst
-            else:
-                other_forex.append(inst)
-
-        if eurusd_instrument is None:
-            for inst in CANDIDATE_POOL:
-                if inst.symbol == _EURUSD_ANCHOR:
-                    eurusd_instrument = inst
-                    logger.info("PreScreenAgent: EURUSD force-included as anchor")
-                    break
-
+        # Forex: select top MAX_FOREX by score
         selected_forex: list[Instrument] = []
-        if eurusd_instrument is not None:
-            selected_forex.append(eurusd_instrument)
-        for inst in other_forex:
+        for _score, inst in scored_forex:
             if len(selected_forex) >= self.MAX_FOREX:
                 break
             selected_forex.append(inst)
 
-        selected = selected_stocks + selected_forex
+        # Crypto: force-include BTC anchor, fill remaining slots by score
+        _BTC_ANCHOR = "BTCUSD"
+        btc_inst = next((i for _s, i in scored_crypto if i.symbol == _BTC_ANCHOR), None)
+        if btc_inst is None:
+            btc_inst = next((i for i in CANDIDATE_POOL if i.symbol == _BTC_ANCHOR), None)
+            if btc_inst:
+                logger.info("PreScreenAgent: %s force-included as anchor", _BTC_ANCHOR)
+        other_crypto = [i for _s, i in scored_crypto if i.symbol != _BTC_ANCHOR]
+        selected_crypto: list[Instrument] = []
+        if btc_inst and self.MAX_CRYPTO >= 1:
+            selected_crypto.append(btc_inst)
+        for inst in other_crypto:
+            if len(selected_crypto) >= self.MAX_CRYPTO:
+                break
+            selected_crypto.append(inst)
+
+        selected = selected_stocks + selected_forex + selected_crypto
 
         if not selected:
             logger.warning("PreScreenAgent: no instruments passed — keeping existing UNIVERSE")
             return []
 
         logger.info(
-            "PreScreenAgent selected %d: stocks=[%s] forex=[%s]",
+            "PreScreenAgent selected %d: stocks=[%s] forex=[%s] crypto=[%s]",
             len(selected),
             ", ".join(i.symbol for i in selected_stocks),
             ", ".join(i.symbol for i in selected_forex),
+            ", ".join(i.symbol for i in selected_crypto),
         )
         set_active_universe(selected)
         return selected

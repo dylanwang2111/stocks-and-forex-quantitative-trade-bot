@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import ClassVar, Optional
 
 from config.settings import settings
-from database.models import Trade, get_session, init_db
+from database.models import EventLog, Trade, get_session, init_db
 
 logger = logging.getLogger(__name__)
 
@@ -144,11 +144,12 @@ class PerformanceReportGenerator:
         )
 
         trades = self._fetch_closed_trades(period_start)
+        partial_count = self._count_partial_closes(period_start)
 
-        total_trades = len(trades)
-        closed_trades = total_trades  # all fetched rows are closed
+        total_trades = len(trades) + partial_count
+        closed_trades = total_trades
 
-        if total_trades == 0:
+        if len(trades) == 0:
             logger.warning("No closed trades found in the requested period.")
             return PerformanceReport(
                 period_start=period_start,
@@ -217,6 +218,23 @@ class PerformanceReportGenerator:
         except Exception:
             logger.exception("Error fetching closed trades from database.")
             return []
+        finally:
+            session.close()
+
+    def _count_partial_closes(self, period_start: datetime) -> int:
+        """Count partial_close EventLog entries since period_start."""
+        session = get_session(self._db)
+        try:
+            return (
+                session.query(EventLog)
+                .filter(
+                    EventLog.event_type == "partial_close",
+                    EventLog.timestamp >= period_start,
+                )
+                .count()
+            )
+        except Exception:
+            return 0
         finally:
             session.close()
 

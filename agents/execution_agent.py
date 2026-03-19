@@ -257,6 +257,7 @@ class ExecutionAgent:
                 symbol=symbol,
                 exit_price=exit_price,
                 exit_time=datetime.utcnow(),
+                reason=reason,
             )
 
             logger.info(
@@ -317,6 +318,8 @@ class ExecutionAgent:
                 return result
 
             exit_price = result.filled_price or position.entry_price
+            # Compute close_qty BEFORE state reduces position.quantity
+            close_qty = round(position.quantity * close_fraction, 8)
             pnl = self._state.partial_close_position(
                 symbol=symbol,
                 close_fraction=close_fraction,
@@ -328,9 +331,17 @@ class ExecutionAgent:
                 symbol=symbol,
                 description=(
                     f"Partial close {int(close_fraction * 100)}% @ {exit_price:.4f} "
-                    f"pnl={pnl:.2f}"
+                    f"qty={close_qty} pnl={pnl:.2f}"
                 ),
-                metadata={"fraction": close_fraction, "exit_price": exit_price, "pnl_usd": round(pnl, 4)},
+                metadata={
+                    "fraction": close_fraction,
+                    "close_qty": close_qty,
+                    "exit_price": exit_price,
+                    "pnl_usd": round(pnl, 4),
+                    "db_trade_id": position.db_trade_id,
+                    "direction": position.direction,
+                    "broker": position.broker,
+                },
             )
             logger.info(
                 "Partial close | %s %s %.0f%% fill=%.4f pnl=%.2f order_id=%s",
@@ -994,6 +1005,8 @@ class ExecutionAgent:
                 regime=regime.regime.value,
                 entry_time=datetime.utcnow(),
                 status="open",
+                stop_price=risk_params.stop_price,
+                take_profit_price=risk_params.take_profit_price,
                 signal_breakdown=confidence_result.breakdown,
             )
             session.add(trade)

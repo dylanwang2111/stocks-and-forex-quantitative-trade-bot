@@ -42,8 +42,8 @@ _ATR_SL_MULT: dict[str, float] = {
     "forex": 1.5,
 }
 _ATR_TP_MULT: dict[str, float] = {
-    "stock": 4.0,   # 2:1 R:R
-    "forex": 3.0,
+    "stock": 4.0,    # R:R 2.0:1  (stock ATR% is 0.5–2% per bar)
+    "forex": 10.0,   # R:R 6.7:1  (forex ATR% is ~0.05–0.10% per bar; 10× ≈ 80 pips / ~0.74%)
 }
 # Trailing stop: exit when close pulls back N*ATR from the position's best price
 _ATR_TRAIL_MULT: dict[str, float] = {

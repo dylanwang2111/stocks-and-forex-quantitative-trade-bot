@@ -24,7 +24,7 @@ TOTAL_CAPITAL=2000
 IBKR_CAPITAL=1500            # Stocks broker pool
 OANDA_CAPITAL=500            # Forex broker pool
 CASH_RESERVE_PCT=0.30        # 30% never deployed
-RISK_PER_TRADE=0.01          # 1% of broker pool per trade
+RISK_PER_TRADE=0.03          # 3% of broker pool per trade
 
 # ── Trading Parameters ───────────────────────────────────────────────────────
 MIN_CONFIDENCE=55            # Entry threshold (SMALL tier)
@@ -86,7 +86,7 @@ settings.telegram.enabled      # bool (True if token + chat_id both set)
 | `ibkr_capital` | `1500` | IBKR broker pool |
 | `oanda_capital` | `500` | OANDA broker pool |
 | `cash_reserve_pct` | `0.30` | Fraction never deployed |
-| `risk_per_trade` | `0.01` | Max risk per trade (fraction of broker pool) |
+| `risk_per_trade` | `0.03` | Max risk per trade (fraction of broker pool) |
 | `min_confidence` | `55` | Minimum score to enter (SMALL tier) |
 | `max_positions` | `2` | Max simultaneous positions |
 | `swing_holding_days` | `5` | Force-close after N days |
@@ -118,7 +118,7 @@ available_cash(broker)       = deployable - Σ(open_position_cost_basis)
 | Pool | $1,500 | $500 |
 | Reserve (30%) | $450 | $150 |
 | Deployable | $1,050 | $350 |
-| Max risk/trade (1%) | $15 | $5 |
+| Max risk/trade (3%) | $33 | $21 |
 
 ---
 

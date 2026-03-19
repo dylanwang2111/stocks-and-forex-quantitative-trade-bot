@@ -93,12 +93,25 @@ class BacktestRunner:
     - Compute signal category votes from daily close data (simplified for speed)
     - If confidence score ≥ threshold and direction = long → buy signal
     - If confidence score ≥ threshold and direction = short → sell signal
-    - Exit after holding_days bars
+    - Exit when ATR-based stop-loss OR take-profit is hit (two-phase proxy):
+        Phase 1: hard stop at atr_sl_mult × ATR below/above entry
+                 take-profit at atr_tp_mult × ATR above/below entry
+        Phase 2 (proxy): treat TP hit as full exit (conservative approximation
+                 of the live 50%-close + trailing-stop phase)
+    - Max holding_days fallback to bound open trades
     """
 
-    def __init__(self, confidence_threshold: float = 55.0, holding_days: int = 3):
+    def __init__(
+        self,
+        confidence_threshold: float = 55.0,
+        holding_days: int = 7,
+        atr_sl_mult: float = 2.0,
+        atr_tp_mult: float = 4.0,
+    ):
         self.threshold = confidence_threshold
         self.holding_days = holding_days
+        self.atr_sl_mult = atr_sl_mult
+        self.atr_tp_mult = atr_tp_mult
         self.scorer = ConfidenceScorer()
 
     def run(
@@ -130,11 +143,19 @@ class BacktestRunner:
         asset_type = ASSET_TYPE.get(symbol, "stock")
         fee = FEES[asset_type]
 
+        # Resolve TP multiplier by asset type — forex uses a larger mult to
+        # compensate for its lower ATR% (mirrors risk_agent._ATR_TP_MULT_BY_TIER_FOREX)
+        if asset_type == "forex":
+            from agents.risk_agent import _ATR_TP_MULT_BY_TIER_FOREX
+            effective_tp_mult = _ATR_TP_MULT_BY_TIER_FOREX.get("SMALL", 8.0)
+        else:
+            effective_tp_mult = self.atr_tp_mult
+
         # Generate signals on full df (for EMA200 warmup), then slice inside run methods
         if VBT_AVAILABLE:
-            return self._run_vectorbt(symbol, df, start, end, fee)
+            return self._run_vectorbt(symbol, df, start, end, fee, effective_tp_mult)
         else:
-            return self._run_pandas(symbol, df, start, end, fee)
+            return self._run_pandas(symbol, df, start, end, fee, effective_tp_mult)
 
     # ── vectorbt path ──────────────────────────────────────────────────────────
 
@@ -145,7 +166,13 @@ class BacktestRunner:
         start: str,
         end: str,
         fee: float,
+        effective_tp_mult: float | None = None,
     ) -> BacktestResult:
+        tp_mult = effective_tp_mult if effective_tp_mult is not None else self.atr_tp_mult
+
+        # Compute ATR(14) on full df before slicing (needs warmup bars)
+        atr14_full = ta.atr(df["high"], df["low"], df["close"], length=14)
+
         # Generate on full df (EMA200 warmup), then slice to the period
         long_entries, long_exits, short_entries, short_exits = self._generate_signals(df)
         long_entries  = long_entries.loc[start:end]
@@ -153,33 +180,55 @@ class BacktestRunner:
         short_entries = short_entries.loc[start:end]
         short_exits   = short_exits.loc[start:end]
         df_period     = df.loc[start:end]
+        atr14         = atr14_full.loc[start:end]
 
         if long_entries.sum() + short_entries.sum() == 0:
             return self._empty_result(symbol, start, end, reason="No entries generated")
 
+        # Per-bar ATR fraction of price → used as sl_stop / tp_stop fractions
+        close_p = df_period["close"]
+        atr_pct = (atr14 / close_p).fillna(0.015)   # fallback 1.5% if ATR missing
+        sl_stop = (atr_pct * self.atr_sl_mult).clip(upper=0.30)
+        tp_stop = (atr_pct * tp_mult).clip(upper=0.60)
+
         try:
             pf = vbt.Portfolio.from_signals(
-                close=df_period["close"],
+                close=close_p,
                 entries=long_entries,
                 exits=long_exits,
                 short_entries=short_entries,
                 short_exits=short_exits,
+                sl_stop=sl_stop,
+                tp_stop=tp_stop,
                 fees=fee,
                 freq="1D",
                 init_cash=settings.bot.total_capital,
             )
         except TypeError:
-            # Older vectorbt versions don't support short_entries — fall back to long-only
+            # Older vectorbt versions don't support short_entries or per-bar stops
             if long_entries.sum() == 0:
                 return self._empty_result(symbol, start, end, reason="No long entries (long-only fallback)")
-            pf = vbt.Portfolio.from_signals(
-                close=df_period["close"],
-                entries=long_entries,
-                exits=long_exits,
-                fees=fee,
-                freq="1D",
-                init_cash=settings.bot.total_capital,
-            )
+            try:
+                pf = vbt.Portfolio.from_signals(
+                    close=close_p,
+                    entries=long_entries,
+                    exits=long_exits,
+                    sl_stop=sl_stop,
+                    tp_stop=tp_stop,
+                    fees=fee,
+                    freq="1D",
+                    init_cash=settings.bot.total_capital,
+                )
+            except TypeError:
+                # Very old vectorbt — no stop support at all, use signal exits only
+                pf = vbt.Portfolio.from_signals(
+                    close=close_p,
+                    entries=long_entries,
+                    exits=long_exits,
+                    fees=fee,
+                    freq="1D",
+                    init_cash=settings.bot.total_capital,
+                )
 
         stats = pf.stats()
 
@@ -191,7 +240,7 @@ class BacktestRunner:
 
         pf_val = float(stats.get("Profit Factor", 0) or 0)
         if pf_val == 0 or np.isnan(pf_val) or np.isinf(pf_val):
-            pf_val = self._manual_profit_factor(df, long_entries, long_exits, short_entries, short_exits)
+            pf_val = self._manual_profit_factor(df_period, long_entries, long_exits, short_entries, short_exits)
 
         equity = pf.value()
 
@@ -217,57 +266,95 @@ class BacktestRunner:
         start: str,
         end: str,
         fee: float,
+        effective_tp_mult: float | None = None,
     ) -> BacktestResult:
+        tp_mult = effective_tp_mult if effective_tp_mult is not None else self.atr_tp_mult
+        # Compute ATR(14) on full df before slicing (needs warmup bars)
+        atr14_full = ta.atr(df["high"], df["low"], df["close"], length=14)
+
         # Generate on full df (EMA200 warmup), then slice to the period
         long_entries, long_exits, short_entries, short_exits = self._generate_signals(df)
         long_entries  = long_entries.loc[start:end]
         long_exits    = long_exits.loc[start:end]
         short_entries = short_entries.loc[start:end]
         short_exits   = short_exits.loc[start:end]
+        atr14         = atr14_full.loc[start:end]
         df = df.loc[start:end]
-        close = df["close"]
+        close  = df["close"]
+        highs  = df["high"]
+        lows   = df["low"]
 
         initial_cash = settings.bot.total_capital
         cash  = initial_cash
         equity_vals = [cash]
         trades: list[tuple[float, float, str]] = []  # (entry_px, exit_px, side)
 
-        position = 0  # +1 = long, -1 = short, 0 = flat
-        entry_px = 0.0
+        position  = 0   # +1 = long, -1 = short, 0 = flat
+        entry_px  = 0.0
+        stop_lvl  = 0.0
+        tp_lvl    = 0.0
         entry_idx = 0
-        shares = 0.0
+        shares    = 0.0
 
         for i in range(len(df)):
             long_e  = bool(long_entries.iloc[i])
             long_x  = bool(long_exits.iloc[i])
             short_e = bool(short_entries.iloc[i])
             short_x = bool(short_exits.iloc[i])
-            hold_exceeded = position != 0 and (i - entry_idx) >= self.holding_days
+            bar_high  = float(highs.iloc[i])
+            bar_low   = float(lows.iloc[i])
+            bar_close = float(close.iloc[i])
+
+            # Check ATR-based stop / TP hits for open position
+            stop_hit = tp_hit = hold_exceeded = False
+            if position != 0:
+                hold_exceeded = (i - entry_idx) >= self.holding_days
+                if position == 1:   # long
+                    stop_hit = bar_low  <= stop_lvl
+                    tp_hit   = bar_high >= tp_lvl
+                else:               # short
+                    stop_hit = bar_high >= stop_lvl
+                    tp_hit   = bar_low  <= tp_lvl
 
             # Close existing position
-            if position != 0 and (hold_exceeded
-                                  or (position == 1 and long_x)
+            if position != 0 and (stop_hit or tp_hit or hold_exceeded
+                                  or (position == 1  and long_x)
                                   or (position == -1 and short_x)):
                 if position == 1:
-                    exit_px = float(close.iloc[i]) * (1 - fee / 2)
+                    if stop_hit:
+                        exit_px = stop_lvl * (1 - fee / 2)
+                    elif tp_hit:
+                        exit_px = tp_lvl   * (1 - fee / 2)
+                    else:
+                        exit_px = bar_close * (1 - fee / 2)
                     pnl = shares * (exit_px - entry_px)
                 else:
-                    exit_px = float(close.iloc[i]) * (1 + fee / 2)
-                    pnl = shares * (entry_px - exit_px)  # short profit when price falls
+                    if stop_hit:
+                        exit_px = stop_lvl  * (1 + fee / 2)
+                    elif tp_hit:
+                        exit_px = tp_lvl    * (1 + fee / 2)
+                    else:
+                        exit_px = bar_close * (1 + fee / 2)
+                    pnl = shares * (entry_px - exit_px)
                 cash += pnl
                 trades.append((entry_px, exit_px, "long" if position == 1 else "short"))
                 position = 0
-                shares = 0.0
+                shares   = 0.0
 
-            # Open new position
+            # Open new position (ATR determines stop and TP distances)
             if position == 0:
+                bar_atr = float(atr14.iloc[i]) if pd.notna(atr14.iloc[i]) else bar_close * 0.015
                 if long_e:
-                    entry_px = float(close.iloc[i]) * (1 + fee / 2)
+                    entry_px = bar_close * (1 + fee / 2)
+                    stop_lvl = entry_px - self.atr_sl_mult * bar_atr
+                    tp_lvl   = entry_px + tp_mult * bar_atr
                     shares   = (cash * 0.95) / entry_px
                     position = 1
                     entry_idx = i
                 elif short_e:
-                    entry_px = float(close.iloc[i]) * (1 - fee / 2)
+                    entry_px = bar_close * (1 - fee / 2)
+                    stop_lvl = entry_px + self.atr_sl_mult * bar_atr
+                    tp_lvl   = entry_px - tp_mult * bar_atr
                     shares   = (cash * 0.95) / entry_px
                     position = -1
                     entry_idx = i

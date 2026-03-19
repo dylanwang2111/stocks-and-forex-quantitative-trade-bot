@@ -19,7 +19,7 @@ Complete reference for the automated trading system.
 | 09 | [Backtesting](09-backtesting.md) | Backtest runner, validate CLI, walk-forward |
 | 10 | [Optimization](10-optimization.md) | LLM-guided parameter optimization pipeline |
 | 11 | [Notifications](11-notifications.md) | Telegram alerts, all event types |
-| 12 | [Dashboard](12-dashboard.md) | Streamlit monitoring UI |
+| 12 | [Dashboard](12-dashboard.md) | FastAPI SPA monitoring dashboard |
 | 13 | [Deployment](13-deployment.md) | VPS setup, Docker, live mode |
 | 14 | [Operations](14-operations.md) | Running, restarting, logs, common tasks |
 
@@ -40,8 +40,8 @@ python validate.py --portfolio --walkforward
 
 ### View dashboard
 ```bash
-python main.py --mode dashboard
-# Open http://localhost:8501
+python -m uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 &
+# Open http://localhost:8050
 ```
 
 ### Check logs

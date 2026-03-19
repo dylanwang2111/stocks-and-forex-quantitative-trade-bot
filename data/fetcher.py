@@ -12,6 +12,8 @@ Historical / backtest (period explicitly provided):
 from __future__ import annotations
 
 import logging
+import random
+import threading
 import time
 from typing import Dict
 
@@ -105,7 +107,23 @@ _IBKR_TF: dict[str, tuple[str, str]] = {
 _CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
 _CACHE_TTL = 900  # 15 minutes in seconds
 
-_RETRY_DELAYS = (10, 30, 60)  # seconds between retries on rate-limit
+_RETRY_DELAYS = (15, 45, 90)  # seconds between retries on rate-limit
+
+# Limit concurrent yfinance requests to avoid triggering rate limits
+_YF_SEMAPHORE = threading.Semaphore(2)
+
+# Counter for IBKR fetcher client IDs (100–199, avoiding execution agent range)
+_IBKR_CLIENT_COUNTER = 100
+_IBKR_CLIENT_LOCK = threading.Lock()
+
+
+def _next_ibkr_client_id() -> int:
+    """Return a unique client ID in range 100–199 for read-only fetcher connections."""
+    global _IBKR_CLIENT_COUNTER
+    with _IBKR_CLIENT_LOCK:
+        cid = _IBKR_CLIENT_COUNTER
+        _IBKR_CLIENT_COUNTER = 100 if _IBKR_CLIENT_COUNTER >= 199 else _IBKR_CLIENT_COUNTER + 1
+    return cid
 
 
 # ── Asset type helper ──────────────────────────────────────────────────────────
@@ -221,7 +239,7 @@ def _fetch_ibkr(symbol: str, timeframe: str) -> pd.DataFrame:
 
     host     = settings.ibkr.host
     port     = settings.ibkr.port
-    clientId = settings.ibkr.client_id + 1  # +1 avoids conflict with execution agent
+    clientId = _next_ibkr_client_id()  # unique ID per request, avoids concurrent conflicts
 
     bar_size, duration = _IBKR_TF[timeframe]
     forex = _is_forex(symbol)
@@ -261,25 +279,28 @@ def _fetch_with_retry(yf_sym: str, interval: str, period: str) -> pd.DataFrame:
     Fetch OHLCV via yf.download() with exponential backoff on rate-limit errors.
     yf.download() is less aggressively rate-limited than Ticker.history().
     """
-    for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
-        try:
-            raw = yf.download(
-                yf_sym,
-                period=period,
-                interval=interval,
-                auto_adjust=True,
-                progress=False,
-                multi_level_index=False,
-            )
-            return raw
-        except Exception as exc:
-            if "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower():
-                if delay is None:
+    with _YF_SEMAPHORE:
+        # Small random stagger so concurrent callers don't all hit at once
+        time.sleep(random.uniform(0.3, 1.0))
+        for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
+            try:
+                raw = yf.download(
+                    yf_sym,
+                    period=period,
+                    interval=interval,
+                    auto_adjust=True,
+                    progress=False,
+                    multi_level_index=False,
+                )
+                return raw
+            except Exception as exc:
+                if "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower():
+                    if delay is None:
+                        raise
+                    logger.warning("yfinance rate limit; retry %d/%d in %ds…", attempt, len(_RETRY_DELAYS), delay)
+                    time.sleep(delay)
+                else:
                     raise
-                logger.warning("yfinance rate limit; retry %d/%d in %ds…", attempt, len(_RETRY_DELAYS), delay)
-                time.sleep(delay)
-            else:
-                raise
     return pd.DataFrame()  # unreachable
 
 

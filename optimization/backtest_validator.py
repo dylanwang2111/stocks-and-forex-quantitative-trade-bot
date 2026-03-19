@@ -110,10 +110,10 @@ class BacktestValidator:
 
         def _make_runner(**kwargs: Any) -> BacktestRunner:
             r = BacktestRunner(
-                confidence_threshold=kwargs.get(
-                    "confidence_threshold", self._runner.threshold
-                ),
+                confidence_threshold=kwargs.get("confidence_threshold", self._runner.threshold),
                 holding_days=kwargs.get("holding_days", self._runner.holding_days),
+                atr_sl_mult=kwargs.get("atr_sl_mult", self._runner.atr_sl_mult),
+                atr_tp_mult=kwargs.get("atr_tp_mult", self._runner.atr_tp_mult),
             )
             # Share the scorer from the parent runner to avoid re-init overhead
             r.scorer = self._runner.scorer
@@ -231,21 +231,27 @@ class BacktestValidator:
                 ),
             )
 
-        # Step 6: Monte Carlo — vary confidence_threshold by ±5 from proposed value
-        # to simulate parameter noise; count fraction that beat actual OOS Sharpe.
-        base_confidence = (
-            float(proposed_value)
-            if param_name == "confidence_threshold"
-            else self._runner.threshold
-        )
+        # Step 6: Monte Carlo — add noise to the proposed parameter to test
+        # robustness; count the fraction of noisy runs that beat actual OOS Sharpe.
+        # Noise scale: ±10% of the proposed value (or ±5 absolute for confidence).
         beats = 0
         for _ in range(self.MONTE_CARLO_RUNS):
-            noise = random.uniform(-5.0, 5.0)
-            noisy_confidence = max(50.0, base_confidence + noise)
+            mc_kwargs = dict(runner_kwargs)  # copy proposed kwargs
+            if param_name == "confidence_threshold":
+                noisy = max(50.0, float(proposed_value) + random.uniform(-5.0, 5.0))
+                mc_kwargs["confidence_threshold"] = noisy
+            elif param_name == "atr_sl_mult":
+                noisy = max(0.5, float(proposed_value) * random.uniform(0.85, 1.15))
+                mc_kwargs["atr_sl_mult"] = noisy
+            elif param_name == "atr_tp_mult":
+                noisy = max(1.0, float(proposed_value) * random.uniform(0.85, 1.15))
+                mc_kwargs["atr_tp_mult"] = noisy
             try:
                 mc_runner = BacktestRunner(
-                    confidence_threshold=noisy_confidence,
-                    holding_days=runner_kwargs.get("holding_days", self._runner.holding_days),
+                    confidence_threshold=mc_kwargs.get("confidence_threshold", self._runner.threshold),
+                    holding_days=mc_kwargs.get("holding_days", self._runner.holding_days),
+                    atr_sl_mult=mc_kwargs.get("atr_sl_mult", self._runner.atr_sl_mult),
+                    atr_tp_mult=mc_kwargs.get("atr_tp_mult", self._runner.atr_tp_mult),
                 )
                 mc_runner.scorer = self._runner.scorer
                 mc_result: BacktestResult = mc_runner.run(
@@ -323,18 +329,15 @@ class BacktestValidator:
 
         Mapping:
           confidence_threshold → confidence_threshold=proposed_value
-          holding_days         → holding_days=int(proposed_value)
-          min_lead_gap         → confidence_threshold as proxy (no direct mapping
-                                 yet; pass current threshold unchanged so only
-                                 the ConfidenceScorer side is affected in live use)
+          atr_sl_mult          → atr_sl_mult=float(proposed_value)
+          atr_tp_mult          → atr_tp_mult=float(proposed_value)
         """
         if param_name == "confidence_threshold":
             return {"confidence_threshold": float(proposed_value)}
-        elif param_name == "holding_days":
-            return {"holding_days": int(proposed_value)}
-        elif param_name == "min_lead_gap":
-            # min_lead_gap affects ConfidenceScorer only; proxy via current threshold
-            return {"confidence_threshold": self._runner.threshold}
+        elif param_name == "atr_sl_mult":
+            return {"atr_sl_mult": float(proposed_value)}
+        elif param_name == "atr_tp_mult":
+            return {"atr_tp_mult": float(proposed_value)}
         else:
             logger.warning(
                 "Unknown param_name '%s'; falling back to current runner settings.",

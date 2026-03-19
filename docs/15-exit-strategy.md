@@ -8,12 +8,34 @@ Every open position is evaluated every 15 minutes by `_check_exits()` in `agents
 
 Levels are computed by `RiskAgent` using ATR(14) on 1-hour bars at the moment of entry.
 
-| Broker | Instrument | Stop-Loss | Take-Profit |
-|--------|------------|-----------|-------------|
-| IBKR   | Stocks     | entry ± 2.0 × ATR | entry ± 4.0 × ATR |
-| OANDA  | Forex      | entry ± 1.5 × ATR | entry ± 3.0 × ATR |
+**Stop-loss** is fixed per asset type:
 
-When ATR is unavailable, a flat 2% fallback is used.
+| Broker | Instrument | Stop-Loss |
+|--------|------------|-----------|
+| IBKR   | Stocks     | entry ± 2.0 × ATR |
+| OANDA  | Forex      | entry ± 1.5 × ATR |
+
+**Take-profit** uses separate multiplier tables for stocks and forex, because forex 1h ATR is ~10–20× smaller as a percentage of price than stocks (EURUSD ≈ 0.07% per bar vs stocks ≈ 1%). Using the same multiplier would produce a tiny ~0.3% TP for forex; the higher forex table targets ~0.5–1% (50–100 pips).
+
+**Stocks** (`_ATR_TP_MULT_BY_TIER`):
+
+| Position Tier | TP Mult | SL Mult | R:R |
+|---------------|---------|---------|-----|
+| SMALL  (55–64) | 4.0× | 2.0× | 2.0:1 |
+| MEDIUM (65–74) | 5.0× | 2.0× | 2.5:1 |
+| LARGE  (75–84) | 6.0× | 2.0× | 3.0:1 |
+| FULL   (≥ 85)  | 6.5× | 2.0× | 3.25:1 |
+
+**Forex** (`_ATR_TP_MULT_BY_TIER_FOREX`):
+
+| Position Tier | TP Mult | SL Mult | R:R | Approx pips (ATR=8) |
+|---------------|---------|---------|-----|---------------------|
+| SMALL  (55–64) |  8.0× | 1.5× | 5.3:1 | ~64 pips / ~0.59% |
+| MEDIUM (65–74) | 10.0× | 1.5× | 6.7:1 | ~80 pips / ~0.74% |
+| LARGE  (75–84) | 12.0× | 1.5× | 8.0:1 | ~96 pips / ~0.89% |
+| FULL   (≥ 85)  | 13.0× | 1.5× | 8.7:1 | ~104 pips / ~0.96% |
+
+When ATR is unavailable, a flat 2% fallback is used for stop; TP defaults to 5.0× the stop distance.
 
 ---
 

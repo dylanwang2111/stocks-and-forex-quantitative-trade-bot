@@ -4,6 +4,10 @@ Versioned Gemini prompt templates for the optimization pipeline.
 
 Gemini Flash 2.0 is asked to review a performance report and propose parameter
 changes from within the set of TUNABLE_PARAMS only.
+
+v2.0: Updated for the two-phase ATR exit strategy (v1.3.0+).
+  - Replaced holding_days / min_lead_gap with atr_sl_mult / atr_tp_mult
+  - Locked list now includes all v1.3.0 env vars
 """
 from __future__ import annotations
 
@@ -11,43 +15,59 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-PROMPT_VERSION = "1.0"
+PROMPT_VERSION = "2.0"
 
 # Tunable parameters with their valid ranges and defaults.
-# Only these three may ever appear in a Gemini proposal.
+# Only these may ever appear in a Gemini proposal.
 TUNABLE_PARAMS: dict[str, dict[str, Any]] = {
     "confidence_threshold": {
         "min": 55.0,
         "max": 85.0,
         "default": 55.0,
         "type": "float",
+        "description": "Minimum confidence score to enter a trade (MIN_CONFIDENCE env var).",
     },
-    "holding_days": {
-        "min": 1,
-        "max": 14,
-        "default": 3,
-        "type": "int",
-    },
-    "min_lead_gap": {
-        "min": 5.0,
-        "max": 25.0,
-        "default": 10.0,
+    "atr_sl_mult": {
+        "min": 1.0,
+        "max": 4.0,
+        "default": 2.0,
         "type": "float",
+        "description": (
+            "ATR multiplier for the phase-1 hard stop-loss "
+            "(stock default=2.0, forex default=1.5). "
+            "Controls how far the stop is placed from entry."
+        ),
+    },
+    "atr_tp_mult": {
+        "min": 2.0,
+        "max": 10.0,
+        "default": 4.0,
+        "type": "float",
+        "description": (
+            "ATR multiplier for the phase-1 take-profit target for STOCKS (SMALL tier baseline=4.0). "
+            "Forex uses a separate higher multiplier (8–13×) and is not tunable here. "
+            "When price hits TP, phase-2 activates: 50% is closed and a trailing stop engages. "
+            "Higher values capture more trend but reduce win rate."
+        ),
     },
 }
 
 # Parameters that must never appear in any proposal.
-# Gemini is told about these explicitly so it understands what is off-limits.
 LOCKED_PARAMS: list[str] = [
     "total_capital",
+    "ibkr_capital",
+    "oanda_capital",
     "cash_reserve",
     "max_positions",
+    "max_stocks",
+    "max_forex",
+    "max_crypto",
     "risk_per_trade",
+    "target_atr_pct",
+    "swing_holding_days",
+    "partial_exit_fraction",
     "rsi_period",
     "ema_length",
-    "atr_multiplier",
-    "stop_pct",
-    "tp_pct",
 ]
 
 
@@ -80,9 +100,11 @@ def build_optimization_prompt(performance_report_dict: dict) -> str:
     tunable_lines: list[str] = []
     for name, spec in TUNABLE_PARAMS.items():
         current = current_params.get(name, spec["default"])
+        desc = spec.get("description", "")
         tunable_lines.append(
             f'  - {name}: current={current}, type={spec["type"]}, '
-            f'range=[{spec["min"]}, {spec["max"]}]'
+            f'range=[{spec["min"]}, {spec["max"]}]\n'
+            f'    Description: {desc}'
         )
     tunable_block = "\n".join(tunable_lines)
 
@@ -111,6 +133,17 @@ You are a quantitative trading system optimizer. Your job is to review a \
 performance report from a live algorithmic trading bot and propose conservative \
 parameter adjustments that are supported directly by the data.
 
+## Strategy Context
+
+The bot uses a two-phase ATR-based exit strategy:
+- Phase 1: Enter trade, hold until hard stop (atr_sl_mult × ATR below entry) \
+or take-profit target (atr_tp_mult × ATR above entry) is reached.
+- Phase 2: When TP is hit, close 50% of the position and activate a trailing stop \
+on the remaining 50%.
+- Signals use a confidence score threshold (confidence_threshold) computed from \
+8 technical categories (EMA crossovers, RSI, MACD, Bollinger Bands, volume OBV, \
+price structure, multi-timeframe, macro). Only scores ≥ confidence_threshold trigger entry.
+
 ## Performance Report
 
 {performance_json}
@@ -123,9 +156,9 @@ parameter adjustments that are supported directly by the data.
 
 {locked_block}
 
-These locked parameters control capital allocation, risk limits, and low-level \
-signal construction. They are outside the scope of this optimization cycle and \
-must not appear in any proposal.
+These locked parameters control capital allocation, risk limits, broker routing, \
+and low-level signal construction. They are outside the scope of this optimization \
+cycle and must not appear in any proposal.
 
 ## Task
 
@@ -161,15 +194,14 @@ Return your response now.
 
 def get_current_params() -> dict[str, Any]:
     """
-    Return the current values of all tunable parameters.
-
-    confidence_threshold is read from settings. holding_days and min_lead_gap
-    are hardcoded Phase 3 defaults because they are not yet stored in settings.
+    Return the current values of all tunable parameters, read from live settings
+    and risk_agent constants.
     """
     from config.settings import settings
+    from agents.risk_agent import _ATR_SL_MULT, _ATR_TP_MULT_BY_TIER
 
     return {
         "confidence_threshold": settings.bot.min_confidence,
-        "holding_days": 3,      # hardcoded default for Phase 3
-        "min_lead_gap": 10.0,   # hardcoded default for Phase 3
+        "atr_sl_mult":  _ATR_SL_MULT.get("stock", 2.0),
+        "atr_tp_mult":  _ATR_TP_MULT_BY_TIER.get("SMALL", 4.0),
     }

@@ -158,7 +158,7 @@ yfinance rate limits (`YFRateLimitError`) are handled at multiple levels:
 |---------|----------|
 | Scan cycle (real-time) | IBKR primary → yfinance skipped or retried once |
 | Portfolio scoring | Bulk fetch fails → IBKR sequential fallback |
-| Macro context (VIX/GLD/USO) | Silent fallback to neutral (0 macro score) |
+| Macro context (VIX/GLD/USO/EVZ) | Silent fallback to neutral (0 macro score / EVZ=7.0) |
 | Snapshot P&L | Cached price used (15-min TTL); WARNING logged if all sources fail |
 
 The bot never blocks or crashes on a rate limit. All fetch paths have graceful fallbacks.

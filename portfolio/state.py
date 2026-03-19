@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from database.models import PortfolioSnapshot, Trade, get_session
+from database.models import EventLog, PortfolioSnapshot, Trade, get_session
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -127,17 +127,20 @@ class PortfolioStateManager:
     def available_cash(self, broker: str | None = None) -> float:
         """Capital available to open new positions.
 
+        Compounds realized P&L into the pool so closed profits increase
+        the capital available for new trades.
+
         If *broker* is given, uses that broker's configured capital pool
-        (IBKR_CAPITAL / OANDA_CAPITAL) minus what's already deployed there.
-        Falls back to the unified total_capital pool when no broker is given
-        or no per-broker capital is configured.
+        (IBKR_CAPITAL / OANDA_CAPITAL) plus realized P&L for that broker,
+        minus what's already deployed there.
         """
+        realized = self.realized_pnl_by_broker(broker)
         if broker is not None:
             broker_cap = settings.bot.broker_capital(broker)
             reserve = broker_cap * settings.bot.cash_reserve_pct
-            avail = broker_cap - reserve - self.deployed_capital(broker)
+            avail = broker_cap + realized - reserve - self.deployed_capital(broker)
         else:
-            avail = self._total_capital - self._cash_reserve - self.deployed_capital()
+            avail = self._total_capital + realized - self._cash_reserve - self.deployed_capital()
         return max(avail, 0.0)
 
     def position_count(self) -> int:
@@ -200,6 +203,7 @@ class PortfolioStateManager:
         symbol: str,
         exit_price: float,
         exit_time: datetime,
+        reason: str | None = None,
     ) -> None:
         """Close an open position and persist the outcome to the database.
 
@@ -241,6 +245,8 @@ class PortfolioStateManager:
                 trade.pnl_usd = round(pnl_usd, 6)
                 trade.pnl_pct = round(pnl_pct, 6)
                 trade.status = "closed"
+                if reason is not None:
+                    trade.notes = reason
                 session.commit()
                 logger.info(
                     "Trade id=%d closed | %s %s exit=%.4f pnl=%.2f (%.2f%%)",
@@ -288,12 +294,12 @@ class PortfolioStateManager:
         else:
             pnl_usd = (position.entry_price - exit_price) * close_qty
 
-        # Persist reduced quantity to Trade row
+        # Persist remaining quantity to Trade row (original quantity is preserved)
         session = get_session(self._database_url)
         try:
             trade = session.get(Trade, position.db_trade_id)
             if trade is not None:
-                trade.quantity = round(remain_qty, 8)
+                trade.remaining_quantity = round(remain_qty, 8)
                 session.commit()
             else:
                 logger.warning(
@@ -354,13 +360,30 @@ class PortfolioStateManager:
             restored = 0
             for trade in open_trades:
                 detail = stop_tp.get(trade.symbol, {})
-                stop_price = detail.get("stop_price", trade.entry_price * (0.98 if trade.direction == "long" else 1.02))
-                tp_price   = detail.get("take_profit_price", trade.entry_price * (1.04 if trade.direction == "long" else 0.96))
+                # Priority: snapshot detail → Trade table columns → hardcoded fallback
+                stop_price = (
+                    detail.get("stop_price")
+                    or trade.stop_price
+                    or trade.entry_price * (0.98 if trade.direction == "long" else 1.02)
+                )
+                tp_price = (
+                    detail.get("take_profit_price")
+                    or trade.take_profit_price
+                    or trade.entry_price * (1.04 if trade.direction == "long" else 0.96)
+                )
+                # Only restore phase state if the snapshot entry belongs to THIS trade
+                same_trade = detail.get("db_trade_id") == trade.id
+                # Use remaining_quantity if a partial close has occurred, else original quantity
+                current_qty = (
+                    trade.remaining_quantity
+                    if trade.remaining_quantity is not None
+                    else trade.quantity
+                )
                 pos = Position(
                     symbol=trade.symbol,
                     broker=trade.broker,
                     direction=trade.direction,
-                    quantity=trade.quantity,
+                    quantity=current_qty,
                     entry_price=trade.entry_price,
                     stop_price=stop_price,
                     take_profit_price=tp_price,
@@ -368,8 +391,8 @@ class PortfolioStateManager:
                     position_tier=trade.position_tier,
                     entry_time=trade.entry_time,
                     db_trade_id=trade.id,
-                    tp_breach_streak=detail.get("tp_breach_streak", 0),
-                    partial_exit_done=detail.get("partial_exit_done", False),
+                    tp_breach_streak=detail.get("tp_breach_streak", 0) if same_trade else 0,
+                    partial_exit_done=detail.get("partial_exit_done", False) if same_trade else False,
                 )
                 with self._lock:
                     self._positions[trade.symbol] = pos
@@ -430,15 +453,12 @@ class PortfolioStateManager:
     # ------------------------------------------------------------------
 
     def daily_pnl(self) -> float:
-        """Sum of pnl_usd for all Trade rows closed today (UTC)."""
-        today_start = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        # Strip timezone for comparison with naive DB datetimes
-        today_start_naive = today_start.replace(tzinfo=None)
+        """Realized P&L for today (local calendar day): closed trades + partial close events."""
+        today_start_naive = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         session = get_session(self._database_url)
         try:
+            # Full closes
             trades_today = (
                 session.query(Trade)
                 .filter(
@@ -448,9 +468,82 @@ class PortfolioStateManager:
                 .all()
             )
             total = sum(t.pnl_usd for t in trades_today if t.pnl_usd is not None)
+
+            # Partial closes (P&L stored in EventLog.metadata["pnl_usd"])
+            partial_events = (
+                session.query(EventLog)
+                .filter(
+                    EventLog.event_type == "partial_close",
+                    EventLog.timestamp >= today_start_naive,
+                )
+                .all()
+            )
+            for evt in partial_events:
+                meta = evt.event_metadata or {}
+                if isinstance(meta, str):
+                    import json
+                    meta = json.loads(meta)
+                total += meta.get("pnl_usd", 0.0)
+
             return round(total, 6)
         except Exception:
             logger.exception("daily_pnl: DB query failed")
+            return 0.0
+        finally:
+            session.close()
+
+    def total_realized_pnl(self) -> float:
+        """All-time realized P&L: all closed trades + all partial close events."""
+        return self.realized_pnl_by_broker(broker=None)
+
+    def realized_pnl_by_broker(self, broker: str | None = None) -> float:
+        """Realized P&L for a specific broker, or all brokers when broker=None.
+
+        Sums:
+        - Closed Trade rows (filtered by broker when given)
+        - partial_close EventLog rows, matched to Trade via db_trade_id
+          (events without db_trade_id are attributed proportionally by initial
+          capital weight when broker is given, or included in full when broker=None)
+        """
+        session = get_session(self._database_url)
+        try:
+            import json as _json
+
+            # Closed trades
+            q = session.query(Trade).filter(Trade.status == "closed")
+            if broker is not None:
+                q = q.filter(Trade.broker == broker)
+            total = sum(t.pnl_usd for t in q.all() if t.pnl_usd is not None)
+
+            # Partial close events
+            partial_events = (
+                session.query(EventLog)
+                .filter(EventLog.event_type == "partial_close")
+                .all()
+            )
+            for evt in partial_events:
+                meta = evt.event_metadata or {}
+                if isinstance(meta, str):
+                    meta = _json.loads(meta)
+                pnl = meta.get("pnl_usd", 0.0)
+                if broker is None:
+                    total += pnl
+                    continue
+                # Attribute to broker via db_trade_id when available
+                trade_id = meta.get("db_trade_id")
+                if trade_id is not None:
+                    trade = session.get(Trade, trade_id)
+                    if trade is not None and trade.broker == broker:
+                        total += pnl
+                else:
+                    # Older events without db_trade_id: split by initial capital weight
+                    total_initial = settings.bot.total_capital or 1.0
+                    broker_initial = settings.bot.broker_capital(broker)
+                    total += pnl * (broker_initial / total_initial)
+
+            return round(total, 6)
+        except Exception:
+            logger.exception("realized_pnl_by_broker: DB query failed")
             return 0.0
         finally:
             session.close()
@@ -499,9 +592,44 @@ class PortfolioStateManager:
             "positions_detail": positions_detail,
         }
 
+    def update_snapshot_prices(self, prices: dict) -> None:
+        """Patch the most recent snapshot's positions_detail with current market prices.
+
+        Called by the orchestrator after it fetches live prices for the Telegram
+        summary, so the dashboard can display unrealized P&L without re-fetching.
+        """
+        if not prices:
+            return
+        import json as _json
+        session = get_session(self._database_url)
+        try:
+            snap = (
+                session.query(PortfolioSnapshot)
+                .order_by(PortfolioSnapshot.timestamp.desc())
+                .first()
+            )
+            if snap and snap.positions_detail:
+                details = snap.positions_detail
+                if isinstance(details, str):
+                    details = _json.loads(details)
+                for d in details:
+                    sym = d.get("symbol")
+                    if sym and sym in prices:
+                        d["current_price"] = round(float(prices[sym]), 6)
+                snap.positions_detail = details
+                session.commit()
+                logger.debug("update_snapshot_prices: patched %d symbol(s)", len(prices))
+        except Exception:
+            session.rollback()
+            logger.exception("update_snapshot_prices: DB write failed")
+        finally:
+            session.close()
+
     def save_snapshot(self) -> None:
-        """Write a PortfolioSnapshot row to the database."""
+        """Write a PortfolioSnapshot row and sync stop/tp back to Trade rows."""
         data = self.snapshot()
+        # Equity = initial capital + all realized P&L so the equity curve actually moves
+        data["total_equity"] = round(self._total_capital + self.total_realized_pnl(), 4)
         session = get_session(self._database_url)
         try:
             snap = PortfolioSnapshot(
@@ -515,6 +643,12 @@ class PortfolioStateManager:
                 positions_detail=data["positions_detail"],
             )
             session.add(snap)
+            # Sync in-memory stop/tp (may have moved due to trailing stop) back to Trade rows
+            for detail in data["positions_detail"]:
+                trade = session.get(Trade, detail.get("db_trade_id"))
+                if trade is not None:
+                    trade.stop_price = detail.get("stop_price")
+                    trade.take_profit_price = detail.get("take_profit_price")
             session.commit()
             logger.info(
                 "Snapshot saved | equity=%.2f cash=%.2f positions=%d daily_pnl=%.4f",

@@ -35,6 +35,8 @@ from portfolio.watchlist import CANDIDATE_POOL, Instrument, set_active_universe
 
 logger = logging.getLogger(__name__)
 
+_BTC_ANCHOR    = "BTCUSD"   # always force-included in crypto selection
+
 # ── Sector taxonomy ───────────────────────────────────────────────────────────
 # Maps symbol → sector tag for macro-context bonuses.
 # "energy"  → benefits when crude oil is in an uptrend
@@ -88,6 +90,7 @@ class MacroContext:
     gold_uptrend:  bool  = False  # gold (GLD) EMA20 > EMA60
     gold_price:    float = 0.0    # latest GLD price
     oil_price:     float = 0.0    # latest USO price
+    evz:           float = 7.0    # CBOE Euro Currency Volatility Index (^EVZ)
 
 
 def _fetch_macro_context_shared() -> "MacroContext":
@@ -129,9 +132,10 @@ class PortfolioAgent:
       Broad ETFs:    +0.5 if gold or oil uptrend (diversification value)
     """
 
-    MAX_STOCKS: int = settings.bot.max_stocks
-    MAX_FOREX: int  = settings.bot.max_forex
-    MIN_BARS: int   = 20
+    MAX_STOCKS: int  = settings.bot.max_stocks
+    MAX_FOREX: int   = settings.bot.max_forex
+    MAX_CRYPTO: int  = settings.bot.max_crypto
+    MIN_BARS: int    = 20
     MAX_PER_SECTOR: int = 2   # max stocks from any single sector
 
     def _bulk_fetch(self) -> dict[str, pd.DataFrame]:
@@ -247,7 +251,7 @@ class PortfolioAgent:
         ctx = MacroContext()
         try:
             raw = yf.download(
-                ["^VIX", "GLD", "USO"],
+                ["^VIX", "GLD", "USO", "^EVZ"],
                 period="90d",
                 interval="1d",
                 auto_adjust=True,
@@ -288,12 +292,17 @@ class PortfolioAgent:
                 uso_slow = float(ta.ema(uso_s, length=_OIL_MA_SLOW).iloc[-1])
                 ctx.oil_uptrend = uso_fast > uso_slow
 
+            # EVZ (CBOE Euro Currency Volatility Index)
+            evz_s = _get_close("^EVZ")
+            if evz_s is not None and len(evz_s) > 0:
+                ctx.evz = float(evz_s.iloc[-1])
+
         except Exception as exc:
             logger.warning("PortfolioAgent: macro context fetch failed: %s", exc)
 
         logger.info(
-            "MacroContext: VIX=%.1f  gold_uptrend=%s  oil_uptrend=%s",
-            ctx.vix, ctx.gold_uptrend, ctx.oil_uptrend,
+            "MacroContext: VIX=%.1f  EVZ=%.2f  gold_uptrend=%s  oil_uptrend=%s",
+            ctx.vix, ctx.evz, ctx.gold_uptrend, ctx.oil_uptrend,
         )
         return ctx
 
@@ -346,6 +355,7 @@ class PortfolioAgent:
 
         scored_stocks: list[tuple[float, Instrument]] = []
         scored_forex:  list[tuple[float, Instrument]] = []
+        scored_crypto: list[tuple[float, Instrument]] = []
 
         for instrument in CANDIDATE_POOL:
             df = prefetched.get(instrument.symbol)
@@ -357,11 +367,14 @@ class PortfolioAgent:
             logger.debug("  %s: score=%.2f", instrument.symbol, score)
             if instrument.asset_type == "stock":
                 scored_stocks.append((score, instrument))
+            elif instrument.asset_type == "crypto":
+                scored_crypto.append((score, instrument))
             else:
                 scored_forex.append((score, instrument))
 
         scored_stocks.sort(key=lambda t: t[0], reverse=True)
         scored_forex.sort(key=lambda t: t[0], reverse=True)
+        scored_crypto.sort(key=lambda t: t[0], reverse=True)
 
         # Log top candidates for transparency
         logger.info("Top stock candidates:")
@@ -384,18 +397,40 @@ class PortfolioAgent:
             selected_stocks.append(inst)
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        selected_forex = [inst for _score, inst in scored_forex[: self.MAX_FOREX]]
-        selected = selected_stocks + selected_forex
+        # Forex: select top MAX_FOREX by score
+        selected_forex: list[Instrument] = []
+        for _s, inst in scored_forex:
+            if len(selected_forex) >= self.MAX_FOREX:
+                break
+            selected_forex.append(inst)
+
+        # Crypto: force-include BTC anchor, fill remaining slots by score
+        btc_inst = next((i for _s, i in scored_crypto if i.symbol == _BTC_ANCHOR), None)
+        if btc_inst is None:
+            btc_inst = next((i for i in CANDIDATE_POOL if i.symbol == _BTC_ANCHOR), None)
+            if btc_inst:
+                logger.info("PortfolioAgent: %s force-included as anchor", _BTC_ANCHOR)
+        other_crypto = [i for _s, i in scored_crypto if i.symbol != _BTC_ANCHOR]
+        selected_crypto: list[Instrument] = []
+        if btc_inst and self.MAX_CRYPTO >= 1:
+            selected_crypto.append(btc_inst)
+        for inst in other_crypto:
+            if len(selected_crypto) >= self.MAX_CRYPTO:
+                break
+            selected_crypto.append(inst)
+
+        selected = selected_stocks + selected_forex + selected_crypto
 
         if not selected:
             logger.warning("PortfolioAgent: no instruments passed — keeping existing UNIVERSE")
             return []
 
         logger.info(
-            "PortfolioAgent selected %d: stocks=[%s] forex=[%s]",
+            "PortfolioAgent selected %d: stocks=[%s] forex=[%s] crypto=[%s]",
             len(selected),
             ", ".join(i.symbol for i in selected_stocks),
             ", ".join(i.symbol for i in selected_forex),
+            ", ".join(i.symbol for i in selected_crypto),
         )
         set_active_universe(selected)
         return selected
@@ -581,21 +616,26 @@ def test_portfolio_agent() -> None:
     print(f"PASS: selected {len(selected)} instruments")
 
     for inst in selected:
-        assert inst.asset_type in ("stock", "forex")
+        assert inst.asset_type in ("stock", "forex", "crypto")
     print("PASS: all asset types valid")
 
     assert len(UNIVERSE) == len(selected)
     print(f"PASS: UNIVERSE updated to {len(UNIVERSE)} instruments")
 
-    stock_symbols = {i.symbol for i in selected if i.asset_type == "stock"}
+    # Portfolio agent enforces MAX_PER_SECTOR (not correlated_with exclusion —
+    # that's the scanner's CorrelationGuard). Verify sector cap is respected.
+    sector_counts: dict[str, int] = {}
     for inst in selected:
         if inst.asset_type != "stock":
             continue
-        for corr_sym in inst.correlated_with:
-            assert corr_sym not in stock_symbols or corr_sym == inst.symbol, (
-                f"Correlation violation: {inst.symbol} and {corr_sym} both selected"
-            )
-    print("PASS: no correlated stocks selected together")
+        sector = _SECTOR.get(inst.symbol, "other")
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+    for sector, count in sector_counts.items():
+        assert count <= PortfolioAgent.MAX_PER_SECTOR, (
+            f"Sector cap violated: {count} '{sector}' stocks selected "
+            f"(max={PortfolioAgent.MAX_PER_SECTOR})"
+        )
+    print("PASS: sector cap respected")
 
     print("\nSelected universe:")
     for inst in selected:

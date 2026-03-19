@@ -126,7 +126,7 @@ This is the highest-weighted category because multi-timeframe agreement is the s
 - `-1`: Negative macro/news (e.g. rate hikes, recession fears, war/conflict)
 - `0`: Neutral or ambiguous
 
-**Risk Level → Macro Multiplier** (applied to final position size):
+**Risk Level → Macro Multiplier** (applied to final position size — **stocks and crypto only**):
 
 | Risk Level | Position Multiplier |
 |------------|---------------------|
@@ -135,6 +135,8 @@ This is the highest-weighted category because multi-timeframe agreement is the s
 | HIGH | 0.50× |
 
 This scales down size for FOMC, geopolitical shocks, or high-uncertainty events — without blocking the trade entirely.
+
+> **Forex instruments do not use the LLM macro multiplier.** Forex sizing is governed by a pair-specific volatility multiplier (see RiskAgent section) because VIX and general macro news are poor proxies for currency volatility.
 
 **Cache TTL**: 15 minutes. Refreshed each scan cycle.
 
@@ -197,10 +199,10 @@ Position tier from dominant_score
 |-------|------|---------------|--------|
 | < 45 | NO_TRADE | 0% | Skip |
 | 45–54 | WATCH | 0% | Monitor only |
-| 55–69 | SMALL | 25% of max | Enter (small) |
-| 70–79 | MEDIUM | 50% of max | Enter (medium) |
-| 80–89 | LARGE | 75% of max | Enter (large) |
-| ≥ 90 | FULL | 100% of max | Enter (full) |
+| 55–59 | SMALL | 35% of max | Enter (small) |
+| 60–69 | MEDIUM | 40% of max | Enter (medium) |
+| 70–79 | LARGE | 60% of max | Enter (large) |
+| ≥ 80 | FULL | 80% of max | Enter (full) |
 
 ---
 

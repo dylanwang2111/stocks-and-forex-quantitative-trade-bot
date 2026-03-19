@@ -1,139 +1,222 @@
 # Dashboard
 
-The Streamlit monitoring dashboard provides a real-time view of the bot's portfolio, positions, signals, and system health.
+The dashboard is a FastAPI + single-page application served from `dashboard_v2.py`. It reads the same SQLite database as the trading bot and does not interfere with trading.
 
 ---
 
 ## Starting the Dashboard
 
 ```bash
-python main.py --mode dashboard
-# Open http://localhost:8501
+# Recommended — date-stamped log
+python -m uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 >> logs/dashboard.log 2>&1 &
 
-# Or run independently
-streamlit run dashboard.py
+# Or via main.py
+python main.py --mode dashboard_v2
 ```
 
-The dashboard can run alongside the trading bot — it reads from the same SQLite database and does not interfere with trading.
+Open `http://localhost:8050` in a browser.
+
+The dashboard reloads each page on navigation and has a 60-second auto-refresh timer on the active page.
 
 ---
 
-## Sections
+## Appearance
 
-### Portfolio Metrics (Top Row)
+### Dark Mode
 
-Five summary metrics displayed as cards:
+A **settings button** (gear icon, top-right of the nav bar) opens a preferences panel with a dark-mode toggle. The theme is persisted in `localStorage` and applied on every load without flash (FOUC-prevented via inline `<head>` script).
 
-| Metric | Source |
-|--------|--------|
-| Total Capital | `settings.bot.total_capital` |
-| Realized P&L | Sum of closed trades today (UTC) from DB |
-| Unrealized P&L | Fetched live via `fetch_candles("1h")` for each open position |
-| Total P&L | Realized + Unrealized |
-| PDT Used | `PDTTracker.count_day_trades_rolling()` / limit |
+- Light: warm parchment / ink tones
+- Dark: "Midnight Obsidian" — deep charcoal background, gold accents
 
-Unrealized P&L is computed in real-time on each page load — it is not cached.
+### Charts
 
----
-
-### Equity Curve
-
-Line chart of `PortfolioSnapshot.total_equity` over time, drawn from the hourly snapshot history. Shows the portfolio's growth (or decline) since the bot started.
+All time-series charts support:
+- **Wheel zoom** — scroll to zoom the time axis
+- **Pinch zoom** — touch/trackpad pinch
+- **Drag to pan** — click and drag left/right
+- **Reset zoom** button — appears on hover after zooming
+- **Cross-hair tooltip** — index-mode tooltip showing all series at the cursor
 
 ---
 
-### Open Positions
+## Pages
 
-Table of all currently open positions:
+### Overview
+
+Summary of portfolio health at a glance.
+
+#### Metric Cards
+
+| Card | Value | Sub-label |
+|------|-------|-----------|
+| Equity (MTM) | `total_capital + realized_pnl + unrealized_pnl` | All-time % change |
+| Realized P&L | Sum of all closed trade P&L | Today's realized |
+| Unrealized P&L | Live mark-to-market on open positions | Open position count |
+| Win Rate | Closed winning trades / total closed | Trade count |
+| Open Positions | Count of open `Trade` rows | Drawdown % |
+| PDT Remaining | `PDT_LIMIT − used` day trades (rolling 5d) | Used / limit |
+
+Equity is **mark-to-market**: it includes unrealized P&L from all open positions. Unrealized is fetched live via `fetch_candles("1h")` on each overview load — it is not cached.
+
+#### Equity Curve
+
+Event-driven line chart of cumulative realized P&L over time. Each data point is a closed trade or partial close event. Supports zoom/pan.
+
+#### Capital Allocation
+
+Breakdown per broker pool (IBKR / OANDA / TOTAL):
+
+| Column | Description |
+|--------|-------------|
+| Pool | Broker capital allocation (`IBKR_CAPITAL` / `OANDA_CAPITAL` env vars) |
+| Deployed | Entry price × qty for all open positions |
+| Available | Pool − reserve − deployed |
+| Util % | Deployed / pool |
+| Pos | Open position count |
+
+#### Open Positions (Mini Table)
+
+Compact 8-column table of currently open positions. Columns: Symbol, Direction, Entry, Current, To Stop%, To TP%, Unrealized P&L, Phase.
+
+**View full** button (top-right of the card):
+- Expands the card to full width
+- Switches to the complete 16-column table (identical to the Positions tab)
+- Includes: Stop price, Target price, TP Progress bar, Qty, Held days, Left days, Tier, Confidence
+- Collapses back to the compact view on second click
+
+---
+
+### Positions
+
+Full table of all open positions.
 
 | Column | Description |
 |--------|-------------|
 | Symbol | Instrument |
-| Direction | long / short |
-| Tier | SMALL / MEDIUM / LARGE / FULL |
+| Dir | long / short badge |
+| Phase | Phase 1 / Phase 2 — past TP / Phase 2 — trailing |
+| Entry | Fill price |
+| Current | Last 1h close (fetched live) |
+| Stop | Current stop price (red) |
+| Target | Original TP price (amber) |
+| To Stop% | Distance from current price to stop as % (positive = not yet hit) |
+| To TP% | Distance from current price to TP as % |
+| TP Progress | Progress bar: % of the entry→TP range covered; >100% = past target |
+| Unreal P&L | (current − entry) × qty; negative = loss |
 | Qty | Units held |
-| Entry Price | Fill price |
-| Current Price | Last 1h close (fetched live) |
-| Unrealized P&L | (current − entry) × qty for long; reversed for short |
-| Entry Time | UTC timestamp |
+| Held | Trading days held (see note below) |
+| Left | `SWING_HOLDING_DAYS − Held` |
+| Tier | SMALL / MEDIUM / LARGE / FULL |
+| Conf | Confidence score at entry |
 
-Current price and unrealized P&L are fetched fresh on each dashboard load.
+**Held / Left day counting**:
+- **Stocks and forex**: weekdays only — Saturday and Sunday do not consume holding budget
+- **Crypto (BTCUSD, ETHUSD)**: calendar days — market runs 24/7
 
----
-
-### Recent Trades
-
-Table of the last 20 closed trades from the `trades` table:
-
-| Column | Description |
-|--------|-------------|
-| Symbol | |
-| Direction | |
-| Entry / Exit | Prices |
-| P&L USD | Realized |
-| P&L % | |
-| Exit Reason | stop_loss / take_profit / signal_exit / time_exit |
-| Duration | Entry to exit time |
+This matches exactly how the time-exit trigger counts days in the orchestrator (`_check_exits()`).
 
 ---
 
-### Signal Log
+### Signals
 
-Recent signal scores from the `signal_log` table. Grouped by symbol, showing the last N scans. Useful for diagnosing why an instrument is or is not being entered.
+Recent signal scan results from the `signal_log` table. Grouped by symbol, showing the latest scan per instrument.
 
 | Column | Description |
 |--------|-------------|
-| Time | UTC |
-| Symbol | |
-| Direction | |
-| Score | dominant_score (0–100) |
+| Time | UTC timestamp |
+| Symbol | Instrument |
+| Direction | Dominant signal direction |
+| Score | Overall confidence score (0–100) |
 | Tier | Position tier at that score |
-| Regime | Market regime at scan time |
-| Cat 1–8 | Individual votes |
+| Cat 1–8 | Individual signal category votes |
 
 ---
 
-### Broker Health
+### Trades
 
-Status of IBKR and OANDA connections, read from the `event_log` table:
-- Last heartbeat time
-- Connection state (HEALTHY / DEGRADED / DOWN)
-- Recent connection events
+History of all closed trades and partial closes. Supports filtering by symbol and direction.
 
----
+**Summary row**: total realized P&L, win rate, trade count, average P&L.
 
-### System Events
-
-Recent entries from the `event_log` table:
-- Earnings blackouts
-- Circuit breaker trips
-- PDT warnings
-- Broker reconnects
-- Order errors
+| Column | Description |
+|--------|-------------|
+| Symbol | |
+| Dir | |
+| Entry / Exit | Prices |
+| Realized P&L | Closed trade P&L in USD |
+| Exit Reason | stop_loss / trailing_stop / partial_take_profit / signal_exit / time_exit |
+| Duration | Entry to exit |
+| Phase | Which phase the exit occurred in |
 
 ---
 
-## Refresh
+### Costs
 
-The dashboard does not auto-refresh. Use the browser refresh button or Streamlit's built-in rerun (`R` key) to update data.
+Estimated trading costs per closed trade.
 
-For automatic refresh, add to `.streamlit/config.toml`:
-```toml
-[server]
-runOnSave = true
-```
+| Column | Description |
+|--------|-------------|
+| Symbol | |
+| Gross P&L | Raw trade P&L |
+| Est. Cost | Commission estimate (IBKR tiered / OANDA spread) |
+| Net P&L | Gross − cost |
 
-Or use Streamlit's `st.rerun()` with a timer (adds latency).
+Summary: total gross, total cost, total net.
 
 ---
 
-## Docker
+### Strategies
 
-When running via Docker, the dashboard is a separate container:
+Per-symbol performance breakdown across closed trades.
 
-```bash
-docker compose up -d dashboard
-# Open http://your-server:8501
-```
+| Column | Description |
+|--------|-------------|
+| Symbol | |
+| Trades | Closed trade count |
+| Win Rate | |
+| Avg P&L | Mean P&L per trade |
+| Total P&L | Cumulative |
+| Sharpe | Annualized (trade-level) |
 
-See [Deployment](13-deployment.md) for full Docker configuration.
+Includes a score distribution histogram showing the density of confidence scores at entry.
+
+---
+
+### Optimizer
+
+Interface for the Gemini optimization pipeline.
+
+- **Run Optimization** button triggers a walk-forward backtest + Gemini proposals
+- Proposals are displayed with current/proposed values, rationale, and statistical test results
+- Each proposal can be individually approved or rejected
+- Applied changes are logged to the `optimization_cycles` table
+
+See [Optimization](10-optimization.md) for full pipeline details.
+
+---
+
+### Status
+
+System health at a glance:
+
+- **Bot status**: Running / Stopped (inferred from snapshot age — running if last snapshot < 90 min ago)
+- **Circuit breaker**: Tripped / Clear, reason, daily P&L vs limit
+- **Broker health**: IBKR and OANDA connection state (HEALTHY / DEGRADED / DOWN)
+- **Recent events**: Last 20 entries from the `event_log` table
+
+---
+
+## Data Sources
+
+| Data | Source |
+|------|--------|
+| Open positions | `trades` table (status = 'open') |
+| Current prices | `fetch_candles("1h")` — OANDA → IBKR → yfinance routing |
+| Stop / TP levels | Latest `portfolio_snapshots.positions_detail` JSON |
+| Closed trades | `trades` table (status = 'closed') |
+| Signal history | `signal_log` table |
+| Equity curve | `trades` + `event_log` (partial closes) |
+| System events | `event_log` table |
+| Drawdown | `portfolio_snapshots.drawdown_pct` (latest snapshot) |
+| PDT count | `PDTTracker.count_day_trades_rolling()` |

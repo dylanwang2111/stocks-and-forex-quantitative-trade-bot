@@ -110,6 +110,9 @@ class BotConfig:
     max_forex: int = field(
         default_factory=lambda: int(os.getenv("MAX_FOREX", "2"))
     )
+    max_crypto: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CRYPTO", "1"))
+    )
     database_url: str = field(
         default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///trade_bot.db")
     )
