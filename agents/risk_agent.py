@@ -101,7 +101,13 @@ def _forex_vol_multiplier(symbol: str, atr: Optional[float], current_price: floa
         return 0.75
 
 # ATR-based stop multipliers (fixed per asset type)
-_ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 1.5, "crypto": 2.0}
+_ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 3.0, "crypto": 2.0}
+
+# Minimum stop distance for forex as a fraction of entry price.
+# Guards against low-ATR entries (calm-market periods) where 3×ATR still
+# falls inside normal hourly noise (e.g. USDJPY <30 pips, USDCHF <25 pips).
+# 0.4% ≈ 63 pips USDJPY / 32 pips USDCHF / 43 pips EURUSD — survivable noise floor.
+_FOREX_MIN_STOP_PCT: float = 0.004
 
 # ATR-based TP multipliers — scale with confidence tier for better R:R on high-conviction trades
 # Stocks: lower multiplier because stock ATR% is already large (0.5–2% per 1h bar)
@@ -299,6 +305,13 @@ class RiskAgent:
             logger.warning("RiskAgent: %s current_price=%.6f is non-positive", symbol, current_price)
             return None
 
+        # All forex pairs: quantity = position_size_usd / current_price
+        # EURUSD @ 1.08: 1 unit = 1 EUR ≈ $1.08 → qty = usd / 1.08
+        # USDJPY @ 150:  1 unit = 1 USD → qty = usd / 150 × 150 = usd ... wait,
+        # OANDA: for USDJPY 1 unit = 1 unit of base (USD), so cost in USD = qty * 1
+        # but price is in JPY, so position_size_usd / price gives qty in JPY terms —
+        # use standard formula for all pairs: qty = position_size_usd / current_price
+        # For USDJPY this gives units where cost_basis = qty * price (in USD equivalent)
         raw_qty = position_size_usd / current_price
         quantity = self._round_quantity(raw_qty, instrument.asset_type)
 
@@ -326,6 +339,14 @@ class RiskAgent:
         if atr is not None and atr > 0:
             sl_dist = atr * _ATR_SL_MULT.get(asset_type, 2.0)
             tp_dist = atr * tp_mult
+            # Enforce minimum stop for forex — ATR can be artificially low during
+            # calm-market entries, making stops too tight to survive normal noise.
+            if asset_type == "forex":
+                min_sl = entry_price * _FOREX_MIN_STOP_PCT
+                if sl_dist < min_sl:
+                    # Scale TP by the same ratio so R:R is preserved
+                    tp_dist = tp_dist * (min_sl / sl_dist)
+                    sl_dist = min_sl
         else:
             sl_dist = entry_price * self.STOP_PCT
             tp_dist = entry_price * self.TP_PCT

@@ -29,7 +29,7 @@ except ImportError:
     CronTrigger = None        # type: ignore[assignment]
 
 from config.settings import settings
-from database.models import EventLog, get_session, init_db
+from database.models import EventLog, Trade, get_session, init_db
 from portfolio.state import PortfolioStateManager, Position
 from portfolio.pdt_tracker import PDTTracker
 from resilience.health_monitor import HealthMonitor
@@ -664,12 +664,30 @@ class Orchestrator:
 
         for position in positions:
             symbol = position.symbol
+
+            # ── Market-hours guard (mirrors scanner._is_market_open) ────────
+            # Crypto: 24/7. Forex/stocks: only exit during active session hours.
+            from portfolio.watchlist import get_instrument, is_crypto_symbol as _is_crypto
+            if not _is_crypto(symbol):
+                try:
+                    _instr = get_instrument(symbol)
+                    _h = _instr.active_hours_utc
+                    _open_str, _close_str = _h.split("\u2013")
+                    _oh, _om = (int(x) for x in _open_str.strip().split(":"))
+                    _ch, _cm = (int(x) for x in _close_str.strip().split(":"))
+                    _now_min = now_utc.hour * 60 + now_utc.minute
+                    _in_session = (_oh * 60 + _om) <= _now_min < (_ch * 60 + _cm)
+                except Exception:
+                    _in_session = True  # fail open
+                if now_utc.weekday() >= 5 or not _in_session:
+                    logger.debug("_check_exits: skipping %s — outside market hours", symbol)
+                    continue
+
             entry_date = position.entry_time.date()
             now_date   = now_utc.date()
             # Crypto trades 24/7 — count calendar days.
             # Stocks and forex use weekday-only counting (market closed Sat/Sun).
-            from portfolio.watchlist import is_crypto_symbol
-            if is_crypto_symbol(symbol):
+            if _is_crypto(symbol):
                 held_days = (now_date - entry_date).days
             else:
                 held_days = sum(
@@ -1164,10 +1182,12 @@ class Orchestrator:
         trail_dist = 2.5 * atr
         old_stop = position.stop_price
 
+        new_stop: float | None = None
         if position.direction == "long":
             candidate = current_price - trail_dist
             if candidate > old_stop:
                 position.stop_price = candidate
+                new_stop = candidate
                 logger.info(
                     "Trailing stop: %s long %.4f → %.4f (price=%.4f atr=%.4f)",
                     position.symbol, old_stop, candidate, current_price, atr,
@@ -1176,10 +1196,23 @@ class Orchestrator:
             candidate = current_price + trail_dist
             if candidate < old_stop:
                 position.stop_price = candidate
+                new_stop = candidate
                 logger.info(
                     "Trailing stop: %s short %.4f → %.4f (price=%.4f atr=%.4f)",
                     position.symbol, old_stop, candidate, current_price, atr,
                 )
+
+        # Persist updated stop to DB immediately so dashboard and restarts see it
+        if new_stop is not None and position.db_trade_id is not None:
+            try:
+                session = get_session(self._database_url)
+                trade = session.get(Trade, position.db_trade_id)
+                if trade is not None:
+                    trade.stop_price = new_stop
+                    session.commit()
+                session.close()
+            except Exception:
+                logger.warning("_update_trailing_stop: failed to persist stop for %s", position.symbol)
 
     # ── Cycle summary ─────────────────────────────────────────────────────────
 

@@ -517,6 +517,14 @@ html.dark .m-label-tag {
   background: var(--amber);
   flex-shrink: 0;
 }
+.card-title-sub {
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.03em;
+  text-transform: none;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
 
 /* ── Tables ─────────────────────────────────────────────────────────────────── */
 .table-wrap {
@@ -652,9 +660,199 @@ table.dt tr:last-child td { border-bottom: none; }
 }
 
 /* ── Transaction type badge ─────────────────────────────────────────────────── */
-.tx-open    { color: var(--navy); font-weight: 600; }
-.tx-partial { color: var(--amber); font-weight: 600; }
-.tx-close   { color: var(--text-sub); }
+.type-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.tx-open    { background: rgba(30,80,200,0.12); color: #4a90e2; }
+.tx-partial { background: rgba(200,140,20,0.12); color: var(--amber); }
+.tx-close   { background: rgba(120,120,120,0.1); color: var(--text-sub); }
+
+/* Row tinting */
+tr.tr-tx-open    { background: rgba(30,80,200,0.03); }
+tr.tr-tx-partial { background: rgba(200,140,20,0.04); }
+
+/* ── Broker badge ───────────────────────────────────────────────────────────── */
+.broker-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.broker-ibkr  { background: rgba(100,180,255,0.12); color: #5aabf0; }
+.broker-oanda { background: rgba(255,140,60,0.12);  color: #f08040; }
+
+/* ── Reason badges ──────────────────────────────────────────────────────────── */
+.reason-stop    { color: var(--red);       font-size: 11px; font-family: var(--mono); }
+.reason-tp      { color: var(--green);     font-size: 11px; font-family: var(--mono); }
+.reason-sig     { color: #7ec8e3;          font-size: 11px; font-family: var(--mono); }
+.reason-partial { color: var(--amber);     font-size: 11px; font-family: var(--mono); }
+.reason-entry   { color: var(--text-muted);font-size: 11px; font-family: var(--mono); }
+.reason-other   { color: var(--text-sub);  font-size: 11px; font-family: var(--mono); }
+
+/* ── Stop / TP inline price levels ─────────────────────────────────────────── */
+.price-levels { display: flex; gap: 6px; margin-top: 3px; }
+.price-stop   { font-size: 10px; color: var(--red);   font-family: var(--mono); }
+.price-tp     { font-size: 10px; color: var(--green); font-family: var(--mono); }
+
+/* ── Type chip multi-select ─────────────────────────────────────────────────── */
+.type-chips {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.type-chip {
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all var(--t);
+}
+.type-chip:hover { border-color: var(--text-sub); color: var(--text); }
+.type-chip[data-type="OPEN"].active    { background: rgba(30,80,200,0.15); border-color: #4a90e2; color: #4a90e2; }
+.type-chip[data-type="PARTIAL"].active { background: rgba(200,140,20,0.15); border-color: var(--amber); color: var(--amber); }
+.type-chip[data-type="CLOSE"].active   { background: rgba(120,120,120,0.15); border-color: var(--text-sub); color: var(--text); }
+
+/* ── Asset type badge ───────────────────────────────────────────────────────── */
+.at-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.at-stock  { background: rgba(120,180,120,0.12); color: #6dba7e; }
+.at-forex  { background: rgba(100,160,255,0.12); color: #5aabf0; }
+.at-crypto { background: rgba(255,170,50,0.12);  color: #f0a830; }
+
+/* ── Column dropdown (Excel AutoFilter) ─────────────────────────────────────── */
+.col-dd {
+  position: fixed;
+  z-index: 9999;
+  width: 210px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  padding: 6px 0;
+  font-family: var(--sans);
+  font-size: 12px;
+}
+.col-dd-sorts {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.col-dd-sort-btn {
+  flex: 1;
+  padding: 5px 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: all var(--t);
+  text-align: center;
+}
+.col-dd-sort-btn:hover { border-color: var(--text-sub); color: var(--text); }
+.col-dd-divider { height: 1px; background: var(--border); margin: 2px 0; }
+.col-dd-search {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 6px 8px;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  outline: none;
+}
+.col-dd-search:focus { border-color: var(--text-sub); }
+.col-dd-list {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 2px 0;
+}
+.col-dd-list::-webkit-scrollbar { width: 4px; }
+.col-dd-list::-webkit-scrollbar-track { background: transparent; }
+.col-dd-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.col-dd-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: background var(--t);
+}
+.col-dd-item:hover { background: var(--bg); }
+.col-dd-item input[type=checkbox] { accent-color: var(--text); cursor: pointer; flex-shrink: 0; }
+.col-dd-item span { font-family: var(--mono); font-size: 11px; color: var(--text-sub); }
+.col-dd-footer {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.col-dd-footer-btn {
+  flex: 1;
+  padding: 4px 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-sub);
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all var(--t);
+}
+.col-dd-footer-btn:hover { border-color: var(--text-sub); color: var(--text); }
+.col-dd-selectall { border-color: transparent; background: var(--bg); }
+
+/* ── th-inner layout (label + trigger btn) ──────────────────────────────────── */
+.th-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  white-space: nowrap;
+}
+.col-dd-btn {
+  background: transparent;
+  border: none;
+  padding: 0 2px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color var(--t);
+}
+.col-dd-btn:hover { color: var(--text); }
+.col-dd-btn.col-dd-active { color: var(--amber); }
 
 /* ── Status indicators ──────────────────────────────────────────────────────── */
 .status-dot {

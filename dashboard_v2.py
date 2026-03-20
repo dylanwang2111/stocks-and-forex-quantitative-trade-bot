@@ -150,9 +150,7 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _build_equity_curve(
-    total_capital: float, db: Session, unrealized_pnl: float = 0.0
-) -> list[dict]:
+def _build_equity_curve(total_capital: float, db: Session) -> list[dict]:
     closed = db.query(Trade).filter(
         Trade.status == "closed", Trade.exit_time.isnot(None)
     ).all()
@@ -189,11 +187,8 @@ def _build_equity_curve(
         step = len(curve) // 300
         curve = [curve[i] for i in range(0, len(curve), step)]
 
-    # Append a live "now" point that includes unrealized PnL so the curve
-    # endpoint matches the Current Equity metric in the overview
-    now_equity = round(total_capital + cumsum + unrealized_pnl, 2)
-    if not curve or curve[-1]["v"] != now_equity:
-        curve.append({"t": _iso(datetime.utcnow()), "v": now_equity})
+    # Append a live "now" point based on realized P&L only
+    curve.append({"t": _iso(datetime.utcnow()), "v": round(total_capital + cumsum, 2)})
 
     return curve
 
@@ -288,8 +283,14 @@ def api_overview():
         if snap:
             last_snap_time = _iso(snap.timestamp)
             snap_age = (datetime.utcnow() - snap.timestamp).total_seconds()
-            bot_running = snap_age < 5400  # 90 min
             drawdown_pct = snap.drawdown_pct
+        # Check if main.py process is actually running
+        import subprocess as _sp
+        try:
+            _out = _sp.check_output(["pgrep", "-f", "main.py"], text=True).strip()
+            bot_running = bool(_out)
+        except Exception:
+            bot_running = snap_age is not None and snap_age < 5400
 
         # Unrealized P&L — fetch live prices (snapshot never stores current_price)
         from data.fetcher import fetch_candles as _fetch_candles
@@ -314,7 +315,7 @@ def api_overview():
         total_unrealized = round(total_unrealized, 2)
 
         with get_db() as db2:
-            curve = _build_equity_curve(total_capital, db2, unrealized_pnl=total_unrealized)
+            curve = _build_equity_curve(total_capital, db2)
 
         # Capital allocation — use remaining_quantity (post-partial-close) for deployed
         def _eff_qty(t: Trade) -> float:
@@ -322,8 +323,16 @@ def api_overview():
 
         ibkr_pos  = [t for t in open_trades if (t.broker or "ibkr") == "ibkr"]
         oanda_pos = [t for t in open_trades if (t.broker or "ibkr") == "oanda"]
-        ibkr_dep  = sum(_eff_qty(t) * (t.entry_price or 0) for t in ibkr_pos)
-        oanda_dep = sum(_eff_qty(t) * (t.entry_price or 0) for t in oanda_pos)
+        def _deployed_usd(t: Trade) -> float:
+            # For USD-base forex pairs (USDJPY, USDCAD, USDCHF): 1 OANDA unit = 1 USD
+            # → deployed = quantity, NOT quantity * price (which gives inflated notional)
+            sym = (t.symbol or "").upper()
+            if (t.broker or "ibkr") == "oanda" and sym.startswith("USD"):
+                return _eff_qty(t)
+            return _eff_qty(t) * (t.entry_price or 0)
+
+        ibkr_dep  = sum(_deployed_usd(t) for t in ibkr_pos)
+        oanda_dep = sum(_deployed_usd(t) for t in oanda_pos)
         ibkr_res  = ibkr_cap  * reserve_pct
         oanda_res = oanda_cap * reserve_pct
         total_dep = ibkr_dep + oanda_dep
@@ -398,6 +407,10 @@ def api_positions():
         with get_db() as db:
             open_trades = db.query(Trade).filter(Trade.status == "open").all()
             stop_tp_map = _get_stop_tp_map(db)
+            closed_syms = {
+                t.symbol for t in db.query(Trade).filter(Trade.status.in_(["closed", "cancelled"])).all()
+                if t.symbol not in {t2.symbol for t2 in open_trades}
+            }
 
         rows = []
         now = datetime.utcnow()
@@ -537,6 +550,8 @@ def api_positions():
         for sym, detail in stop_tp_map.items():
             if sym in open_syms:
                 continue  # already covered by Trade table
+            if sym in closed_syms:
+                continue  # closed in DB — don't show from stale snapshot
             if not detail.get("direction") or not detail.get("entry_price"):
                 continue
             rows.append(_build_position_row(
@@ -671,6 +686,18 @@ def api_trades(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
 ):
+    from portfolio.watchlist import get_instrument as _get_inst
+    def _asset_type(sym: str) -> str:
+        try:
+            return _get_inst(sym).asset_type
+        except Exception:
+            s = sym.upper()
+            if s in ("BTCUSD", "ETHUSD", "XRPUSD"):
+                return "crypto"
+            if len(s) == 6 and s.isalpha():
+                return "forex"
+            return "stock"
+
     try:
         with get_db() as db:
             all_trades    = db.query(Trade).order_by(Trade.entry_time.desc()).all()
@@ -697,12 +724,14 @@ def api_trades(
             rows.append({
                 "time": t.entry_time, "type": "OPEN", "symbol": t.symbol,
                 "broker": t.broker, "direction": t.direction,
+                "asset_type": _asset_type(t.symbol),
                 "price": t.entry_price, "quantity": t.quantity,
-                "pnl_usd": None, "reason": "entry",
+                "pnl_usd": None, "pnl_pct": None, "reason": "entry",
                 "tier": t.position_tier, "confidence": t.confidence,
-                "trade_id": t.id,
+                "trade_id": t.id, "regime": t.regime,
                 "stop_price": round(stop, 4) if stop else None,
                 "take_profit_price": round(tp, 4) if tp else None,
+                "entry_time": _iso(t.entry_time), "exit_time": None,
             })
 
         # Partial closes
@@ -729,11 +758,13 @@ def api_trades(
                 "time": ev.timestamp, "type": f"PARTIAL {int(frac*100)}%",
                 "symbol": sym, "broker": t.broker if t else "",
                 "direction": direction_val,
+                "asset_type": _asset_type(sym),
                 "price": price, "quantity": cqty,
-                "pnl_usd": pnl, "reason": "phase-2 partial",
+                "pnl_usd": pnl, "pnl_pct": None, "reason": "phase-2 partial",
                 "tier": t.position_tier if t else "", "confidence": t.confidence if t else None,
-                "trade_id": tid or (t.id if t else None),
+                "trade_id": tid or (t.id if t else None), "regime": t.regime if t else None,
                 "stop_price": None, "take_profit_price": None,
+                "entry_time": _iso(t.entry_time) if t else None, "exit_time": _iso(ev.timestamp),
             })
 
         # Full closes
@@ -741,11 +772,13 @@ def api_trades(
             rows.append({
                 "time": t.exit_time, "type": "CLOSE", "symbol": t.symbol,
                 "broker": t.broker, "direction": t.direction,
-                "price": t.exit_price, "quantity": t.quantity,
-                "pnl_usd": t.pnl_usd, "reason": t.notes or "",
+                "asset_type": _asset_type(t.symbol),
+                "price": t.exit_price, "quantity": t.remaining_quantity if t.remaining_quantity is not None else t.quantity,
+                "pnl_usd": t.pnl_usd, "pnl_pct": t.pnl_pct, "reason": t.notes or "",
                 "tier": t.position_tier, "confidence": t.confidence,
-                "trade_id": t.id,
+                "trade_id": t.id, "regime": t.regime,
                 "stop_price": None, "take_profit_price": None,
+                "entry_time": _iso(t.entry_time), "exit_time": _iso(t.exit_time),
             })
 
         # Filter
@@ -1016,8 +1049,13 @@ def api_status():
         last_snap = None
         if snap:
             snap_age = (datetime.utcnow() - snap.timestamp).total_seconds()
-            bot_running = snap_age < 5400
             last_snap = _iso(snap.timestamp)
+        import subprocess as _sp
+        try:
+            _out = _sp.check_output(["pgrep", "-f", "main.py"], text=True).strip()
+            bot_running = bool(_out)
+        except Exception:
+            bot_running = snap_age is not None and snap_age < 5400
 
         # Broker health
         ibkr_ok  = _ping_tcp(settings.ibkr.host, settings.ibkr.port)

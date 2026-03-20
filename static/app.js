@@ -134,10 +134,10 @@ const OPT_PAGE_SIZE = 50;
 const SIG_PAGE_SIZE = 25;
 
 // Trade ledger sort/filter state
-let tradesAllRows   = [];   // full unfiltered page data from API
-let tradesSortCol   = 'time';
-let tradesSortDir   = -1;   // -1 = desc, 1 = asc
-let tradesColFilter = {};   // { col: "text" }
+let tradesAllRows    = [];        // full unfiltered page data from API
+let tradesSortCol    = 'time';
+let tradesSortDir    = -1;        // -1 = desc, 1 = asc
+let tradesColFilters = {};        // { col: Set<string> }  — active value selections per column
 
 /* ── Chart.js defaults ─────────────────────────────────────────────────────── */
 Chart.defaults.font.family = "'IBM Plex Mono', monospace";
@@ -808,11 +808,13 @@ function tradeColVal(row, col) {
     case 'type':               return row.type || '';
     case 'symbol':             return row.symbol || '';
     case 'direction':          return row.direction || '';
+    case 'asset_type':         return row.asset_type || '';
     case 'price':              return row.price ?? -Infinity;
     case 'stop_price':         return row.stop_price ?? -Infinity;
     case 'take_profit_price':  return row.take_profit_price ?? -Infinity;
     case 'quantity':           return row.quantity ?? -Infinity;
     case 'pnl_usd':            return row.pnl_usd ?? -Infinity;
+    case 'reason':             return row.reason || '';
     case 'tier':               return row.tier || '';
     case 'confidence':         return row.confidence ?? -Infinity;
     case 'trade_id':           return row.trade_id ?? -Infinity;
@@ -823,21 +825,14 @@ function tradeColVal(row, col) {
 function applyTradesFiltersAndSort() {
   let rows = [...tradesAllRows];
 
-  // Type filter (OPEN / PARTIAL / CLOSE)
-  const typeFilter = document.getElementById('tr-type-filter')?.value || '';
-  if (typeFilter === 'OPEN')    rows = rows.filter(r => r.type === 'OPEN');
-  else if (typeFilter === 'PARTIAL') rows = rows.filter(r => r.type?.includes('PARTIAL'));
-  else if (typeFilter === 'CLOSE')   rows = rows.filter(r => r.type === 'CLOSE');
-
-  // Column filters
-  Object.entries(tradesColFilter).forEach(([col, text]) => {
-    if (!text) return;
-    const lo = text.toLowerCase();
+  // Column value filters (each col has a Set of selected values; empty Set = no filter)
+  for (const [col, sel] of Object.entries(tradesColFilters)) {
+    if (!sel || sel.size === 0) continue;
     rows = rows.filter(r => {
-      const v = tradeColVal(r, col);
-      return String(v).toLowerCase().includes(lo);
+      const v = String(tradeColVal(r, col) ?? '').toLowerCase();
+      return sel.has(v);
     });
-  });
+  }
 
   // Sort
   rows.sort((a, b) => {
@@ -849,21 +844,69 @@ function applyTradesFiltersAndSort() {
   });
 
   renderTradesRows(rows);
-  updateSortIcons();
+  updateColDdIndicators();
 }
 
 function updateSortIcons() {
+  // Legacy stub — replaced by updateColDdIndicators()
+}
+
+function updateColDdIndicators() {
   document.querySelectorAll('#trades-sort-row th[data-col]').forEach(th => {
-    const icon = th.querySelector('.sort-icon');
-    if (!icon) return;
-    if (th.dataset.col === tradesSortCol) {
-      icon.textContent = tradesSortDir === -1 ? '↓' : '↑';
-      icon.style.color = 'var(--text)';
-    } else {
-      icon.textContent = '↕';
-      icon.style.color = 'var(--text-muted)';
+    const col = th.dataset.col;
+    const btn = th.querySelector('.col-dd-btn');
+    if (!btn) return;
+    const hasFilter = tradesColFilters[col]?.size > 0;
+    const isSort    = col === tradesSortCol;
+    btn.classList.toggle('col-dd-active', hasFilter || isSort);
+    // Show sort arrow in btn when this column is sorted
+    if (isSort) {
+      btn.textContent = tradesSortDir === -1 ? '↓' : '↑';
+    } else if (!hasFilter) {
+      btn.textContent = '⌄';
     }
+    if (hasFilter && !isSort) btn.textContent = '▾';
   });
+}
+
+function assetTypeBadge(at) {
+  if (!at) return '—';
+  const cls = at === 'forex' ? 'at-forex' : at === 'crypto' ? 'at-crypto' : 'at-stock';
+  return `<span class="at-badge ${cls}">${esc(at)}</span>`;
+}
+
+function brokerBadge(b) {
+  if (!b) return '—';
+  const name = b.toLowerCase();
+  const cls  = name === 'oanda' ? 'broker-oanda' : 'broker-ibkr';
+  return `<span class="broker-badge ${cls}">${esc(b.toUpperCase())}</span>`;
+}
+
+function reasonBadge(reason, type) {
+  if (!reason || reason === 'entry') {
+    return type === 'OPEN'
+      ? '<span class="reason-entry">entry</span>'
+      : '<span style="color:var(--text-muted)">—</span>';
+  }
+  const r = reason.toLowerCase();
+  if (r === 'stop_loss')   return '<span class="reason-stop">stop loss</span>';
+  if (r === 'take_profit') return '<span class="reason-tp">take profit</span>';
+  if (r === 'signal_exit') return '<span class="reason-sig">signal exit</span>';
+  if (r.includes('partial')) return '<span class="reason-partial">phase-2</span>';
+  return `<span class="reason-other">${esc(reason)}</span>`;
+}
+
+function holdTime(entryIso, exitIso) {
+  if (!entryIso || !exitIso) return '—';
+  // SQLite may store "YYYY-MM-DD HH:MM:SS" (space); normalize to T for reliable parsing
+  const parse = s => new Date(String(s).replace(' ', 'T'));
+  const ms = parse(exitIso) - parse(entryIso);
+  if (isNaN(ms) || ms < 0) return '—';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  if (h >= 48) return `${Math.floor(h/24)}d ${h%24}h`;
+  if (h >= 1)  return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
 function renderTradesRows(rows) {
@@ -871,28 +914,46 @@ function renderTradesRows(rows) {
   if (!tbody) return;
 
   if (!rows.length) {
-    const cols = 13;
-    tbody.innerHTML = `<tr><td colspan="${cols}">${emptyState('No matching trades')}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13">${emptyState('No matching trades')}</td></tr>`;
     return;
   }
 
   tbody.innerHTML = rows.map(r => {
-    const typeClass = r.type === 'OPEN' ? 'tx-open' : r.type?.includes('PARTIAL') ? 'tx-partial' : 'tx-close';
-    const stopStr = r.stop_price != null ? fmtNum(r.stop_price, 4) : '—';
-    const tpStr   = r.take_profit_price != null ? fmtNum(r.take_profit_price, 4) : '—';
-    return `<tr>
-      <td style="white-space:nowrap;color:var(--text-sub)">${fmtTime(r.time)}</td>
-      <td class="${typeClass}" style="font-weight:600;white-space:nowrap">${r.type}</td>
-      <td style="font-weight:600">${esc(r.symbol)}</td>
+    const isOpen    = r.type === 'OPEN';
+    const isPartial = r.type?.includes('PARTIAL');
+    const isClose   = r.type === 'CLOSE';
+    const typeClass = isOpen ? 'tx-open' : isPartial ? 'tx-partial' : 'tx-close';
+
+    // P&L cell: show USD + % for closes
+    let pnlCell = '—';
+    if (r.pnl_usd != null) {
+      const pct = r.pnl_pct != null ? `<span style="font-size:10px;opacity:0.7;margin-left:4px">${fmtPct(r.pnl_pct)}</span>` : '';
+      pnlCell = `<span class="${pnlClass(r.pnl_usd)}">${fmtUSD(r.pnl_usd)}${pct}</span>`;
+    }
+
+    // Price cell: show stop/tp inline for OPEN rows
+    let priceCell = fmtNum(r.price, 4);
+    if (isOpen && (r.stop_price != null || r.take_profit_price != null)) {
+      const stop = r.stop_price != null ? `<span class="price-stop" title="Stop">▼${fmtNum(r.stop_price,4)}</span>` : '';
+      const tp   = r.take_profit_price != null ? `<span class="price-tp" title="TP">▲${fmtNum(r.take_profit_price,4)}</span>` : '';
+      priceCell += `<div class="price-levels">${stop}${tp}</div>`;
+    }
+
+    const hold = (isClose || isPartial) ? holdTime(r.entry_time, r.exit_time || r.time) : '—';
+
+    return `<tr class="tr-${typeClass}">
+      <td style="white-space:nowrap;color:var(--text-sub);font-size:11px">${fmtTime(r.time)}</td>
+      <td><span class="type-badge ${typeClass}" style="white-space:nowrap">${esc(r.type)}</span></td>
+      <td style="font-weight:600;letter-spacing:0.02em">${esc(r.symbol)}</td>
       <td>${dirBadge(r.direction)}</td>
-      <td style="font-family:var(--mono)">${fmtNum(r.price, 4)}</td>
-      <td style="font-family:var(--mono);color:var(--red)">${r.type === 'OPEN' ? stopStr : '—'}</td>
-      <td style="font-family:var(--mono);color:var(--amber)">${r.type === 'OPEN' ? tpStr : '—'}</td>
-      <td style="font-family:var(--mono)">${fmtNum(r.quantity, 4)}</td>
-      <td class="${pnlClass(r.pnl_usd)}">${r.pnl_usd != null ? fmtUSD(r.pnl_usd) : '—'}</td>
-      <td style="color:var(--text-sub);font-size:11px">${esc(r.reason) || '—'}</td>
+      <td>${assetTypeBadge(r.asset_type)}</td>
+      <td style="font-family:var(--mono);font-size:12px">${priceCell}</td>
+      <td style="font-family:var(--mono);color:var(--text-sub)">${fmtNum(r.quantity, 2)}</td>
+      <td>${pnlCell}</td>
+      <td>${reasonBadge(r.reason, r.type)}</td>
       <td>${tierBadge(r.tier)}</td>
-      <td style="font-family:var(--mono);color:var(--text-sub)">${r.confidence != null ? fmtNum(r.confidence, 1) : '—'}</td>
+      <td style="font-family:var(--mono);color:var(--text-sub);font-size:11px">${r.confidence != null ? fmtNum(r.confidence, 1) : '—'}</td>
+      <td style="font-family:var(--mono);color:var(--text-muted);font-size:11px;white-space:nowrap">${hold}</td>
       <td style="font-family:var(--mono);color:var(--text-muted);font-size:11px">${r.trade_id ?? '—'}</td>
     </tr>`;
   }).join('');
@@ -900,10 +961,8 @@ function renderTradesRows(rows) {
 
 async function renderTrades() {
   const sym = document.getElementById('tr-sym-filter')?.value || '';
-  const dir = document.getElementById('tr-dir-filter')?.value || '';
   const params = new URLSearchParams({ page: tradesPage, page_size: TRADES_PAGE_SIZE });
   if (sym) params.set('symbol', sym);
-  if (dir) params.set('direction', dir);
 
   const data = await apiFetch('/api/trades?' + params);
   if (!data) return;
@@ -1017,31 +1076,131 @@ async function renderTradesCumChart() {
 
 function round2(v) { return Math.round(v * 100) / 100; }
 
-// Sort: click header
-document.querySelector('#trades-sort-row')?.addEventListener('click', e => {
-  const th = e.target.closest('th[data-col]');
-  if (!th) return;
-  const col = th.dataset.col;
-  if (col === tradesSortCol) {
-    tradesSortDir *= -1;
-  } else {
-    tradesSortCol = col;
-    tradesSortDir = -1;
+/* ── Column dropdown (Excel-style AutoFilter) ─────────────────────────────── */
+let colDdActiveCol = null;
+
+function openColDd(col, triggerEl) {
+  const dd = document.getElementById('col-dd');
+  if (!dd) return;
+
+  // Close if same col clicked again
+  if (colDdActiveCol === col && dd.style.display !== 'none') {
+    closeColDd(); return;
   }
-  applyTradesFiltersAndSort();
+  colDdActiveCol = col;
+
+  // Position — fixed coords are viewport-relative; no scroll offset needed
+  const rect = triggerEl.closest('th').getBoundingClientRect();
+  dd.style.display = 'block';
+  const ddW = 210;
+  let left = rect.left;
+  if (left + ddW > window.innerWidth - 8) left = window.innerWidth - ddW - 8;
+  if (left < 4) left = 4;
+  dd.style.left = left + 'px';
+  dd.style.top  = (rect.bottom + 4) + 'px';
+
+  // Sort buttons
+  dd.querySelectorAll('.col-dd-sort-btn').forEach(btn => {
+    btn.onclick = () => {
+      tradesSortCol = col;
+      tradesSortDir = btn.dataset.dir === 'asc' ? 1 : -1;
+      applyTradesFiltersAndSort();
+      closeColDd();
+    };
+  });
+
+  // Populate value list from ALL current rows (pre-filter snapshot for this col)
+  const allVals = [...new Set(
+    tradesAllRows.map(r => String(tradeColVal(r, col) ?? '').toLowerCase()).filter(v => v !== '' && v !== '-infinity')
+  )].sort();
+
+  const currentSel = tradesColFilters[col] || new Set();
+  tradesColFilters[col] = currentSel;
+  const search = document.getElementById('col-dd-search');
+  const list   = document.getElementById('col-dd-list');
+  if (search) { search.value = ''; }
+
+  function renderList(filter) {
+    const visible = filter ? allVals.filter(v => v.includes(filter.toLowerCase())) : allVals;
+    if (!list) return;
+    list.innerHTML = visible.map(v => `
+      <label class="col-dd-item">
+        <input type="checkbox" value="${esc(v)}" ${currentSel.has(v) ? 'checked' : ''}/>
+        <span>${esc(v)}</span>
+      </label>
+    `).join('');
+    // Live update on checkbox change
+    list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        if (cb.checked) currentSel.add(cb.value);
+        else currentSel.delete(cb.value);
+        tradesColFilters[col] = currentSel;
+        applyTradesFiltersAndSort();
+      });
+    });
+  }
+  renderList('');
+  if (search) {
+    search.oninput = () => renderList(search.value);
+    setTimeout(() => search.focus(), 50);
+  }
+
+  // Clear button
+  const clearBtn = document.getElementById('col-dd-clear');
+  if (clearBtn) clearBtn.onclick = () => {
+    tradesColFilters[col] = new Set();
+    closeColDd();
+    applyTradesFiltersAndSort();
+  };
+
+  // Select all button
+  const selAllBtn = document.getElementById('col-dd-selectall');
+  if (selAllBtn) selAllBtn.onclick = () => {
+    allVals.forEach(v => currentSel.add(v));
+    tradesColFilters[col] = currentSel;
+    applyTradesFiltersAndSort();
+    closeColDd();
+  };
+}
+
+function closeColDd() {
+  const dd = document.getElementById('col-dd');
+  if (dd) dd.style.display = 'none';
+  colDdActiveCol = null;
+}
+
+// Open dropdown when trigger button is clicked
+document.getElementById('trades-table')?.addEventListener('click', e => {
+  const btn = e.target.closest('.col-dd-btn');
+  if (!btn) return;
+  e.stopPropagation();
+  openColDd(btn.dataset.col, btn);
 });
 
-// Per-column filter inputs
-document.querySelector('#trades-filter-row')?.addEventListener('input', e => {
-  const input = e.target.closest('.col-filter');
-  if (!input) return;
-  tradesColFilter[input.dataset.col] = input.value;
-  applyTradesFiltersAndSort();
+// Close on outside click
+document.addEventListener('click', e => {
+  const dd = document.getElementById('col-dd');
+  if (!dd || dd.style.display === 'none') return;
+  if (!dd.contains(e.target) && !e.target.closest('.col-dd-btn')) {
+    closeColDd();
+  }
+});
+
+// Close on Escape
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeColDd();
+});
+
+// Clicking the th label (not the ⌄ button) also opens the dropdown
+document.querySelector('#trades-sort-row')?.addEventListener('click', e => {
+  if (e.target.closest('.col-dd-btn')) return; // already handled by trades-table listener
+  const th = e.target.closest('th[data-col]');
+  if (!th) return;
+  const btn = th.querySelector('.col-dd-btn');
+  if (btn) openColDd(th.dataset.col, btn);
 });
 
 document.getElementById('tr-sym-filter')?.addEventListener('change', () => { tradesPage = 1; renderTrades(); });
-document.getElementById('tr-dir-filter')?.addEventListener('change', () => { tradesPage = 1; renderTrades(); });
-document.getElementById('tr-type-filter')?.addEventListener('change', () => { tradesPage = 1; applyTradesFiltersAndSort(); });
 
 function renderPagination(containerId, page, pages, total, onNavigate) {
   const el = document.getElementById(containerId);

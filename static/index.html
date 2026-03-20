@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=11" />
+  <link rel="stylesheet" href="/static/style.css?v=13" />
   <style>
     /* Table horizontal scroll — inline to bypass CSS caching */
     .ov-bottom-grid > * { min-width: 0 !important; }
@@ -95,7 +95,7 @@
 
     <div class="metrics-row" id="ov-metrics">
       <div class="metric-card accent-cyan">
-        <div class="m-label">Equity <span class="m-label-tag">MTM</span></div>
+        <div class="m-label">Equity <span class="m-label-tag">incl. unrealized</span></div>
         <div class="m-value" id="ov-equity">—</div>
         <div class="m-delta" id="ov-equity-delta">—</div>
       </div>
@@ -122,7 +122,7 @@
     </div>
 
     <div class="card">
-      <div class="card-title"><div class="ct-accent"></div> Equity Curve</div>
+      <div class="card-title"><div class="ct-accent"></div> Realized Equity Curve <span class="card-title-sub">realized P&amp;L only</span></div>
       <div class="chart-wrap" style="height:220px">
         <canvas id="equity-chart"></canvas>
         <button class="chart-reset-btn" id="reset-equity-chart" onclick="resetZoom('equity-chart')" title="Reset zoom">Reset zoom</button>
@@ -359,23 +359,6 @@
         <label>Symbol</label>
         <select id="tr-sym-filter"><option value="">All</option></select>
       </div>
-      <div class="filter-group">
-        <label>Direction</label>
-        <select id="tr-dir-filter">
-          <option value="">All</option>
-          <option value="long">Long</option>
-          <option value="short">Short</option>
-        </select>
-      </div>
-      <div class="filter-group">
-        <label>Type</label>
-        <select id="tr-type-filter">
-          <option value="">All</option>
-          <option value="OPEN">Open</option>
-          <option value="PARTIAL">Partial Close</option>
-          <option value="CLOSE">Full Close</option>
-        </select>
-      </div>
     </div>
 
     <div class="card">
@@ -391,34 +374,19 @@
         <table class="dt sortable" id="trades-table">
           <thead>
             <tr id="trades-sort-row">
-              <th data-col="time">Time <span class="sort-icon">↕</span></th>
-              <th data-col="type">Type <span class="sort-icon">↕</span></th>
-              <th data-col="symbol">Symbol <span class="sort-icon">↕</span></th>
-              <th data-col="direction">Dir <span class="sort-icon">↕</span></th>
-              <th data-col="price">Price <span class="sort-icon">↕</span></th>
-              <th data-col="stop_price">Stop <span class="sort-icon">↕</span></th>
-              <th data-col="take_profit_price">TP <span class="sort-icon">↕</span></th>
-              <th data-col="quantity">Qty <span class="sort-icon">↕</span></th>
-              <th data-col="pnl_usd">P&amp;L <span class="sort-icon">↕</span></th>
-              <th data-col="reason">Reason</th>
-              <th data-col="tier">Tier <span class="sort-icon">↕</span></th>
-              <th data-col="confidence">Conf <span class="sort-icon">↕</span></th>
-              <th data-col="trade_id">ID <span class="sort-icon">↕</span></th>
-            </tr>
-            <tr id="trades-filter-row" class="filter-row">
-              <td><input class="col-filter" data-col="time" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="type" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="symbol" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="direction" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="price" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="stop_price" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="take_profit_price" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="quantity" placeholder="filter…"/></td>
-              <td><input class="col-filter" data-col="pnl_usd" placeholder="filter…"/></td>
-              <td></td>
-              <td><input class="col-filter" data-col="tier" placeholder="filter…"/></td>
-              <td></td>
-              <td></td>
+              <th data-col="time"><div class="th-inner"><span>Time</span><button class="col-dd-btn" data-col="time" tabindex="-1">⌄</button></div></th>
+              <th data-col="type"><div class="th-inner"><span>Type</span><button class="col-dd-btn" data-col="type" tabindex="-1">⌄</button></div></th>
+              <th data-col="symbol"><div class="th-inner"><span>Symbol</span><button class="col-dd-btn" data-col="symbol" tabindex="-1">⌄</button></div></th>
+              <th data-col="direction"><div class="th-inner"><span>Dir</span><button class="col-dd-btn" data-col="direction" tabindex="-1">⌄</button></div></th>
+              <th data-col="asset_type"><div class="th-inner"><span>Asset Type</span><button class="col-dd-btn" data-col="asset_type" tabindex="-1">⌄</button></div></th>
+              <th data-col="price"><div class="th-inner"><span>Price</span><button class="col-dd-btn" data-col="price" tabindex="-1">⌄</button></div></th>
+              <th data-col="quantity"><div class="th-inner"><span>Qty</span><button class="col-dd-btn" data-col="quantity" tabindex="-1">⌄</button></div></th>
+              <th data-col="pnl_usd"><div class="th-inner"><span>P&amp;L</span><button class="col-dd-btn" data-col="pnl_usd" tabindex="-1">⌄</button></div></th>
+              <th data-col="reason"><div class="th-inner"><span>Reason</span><button class="col-dd-btn" data-col="reason" tabindex="-1">⌄</button></div></th>
+              <th data-col="tier"><div class="th-inner"><span>Tier</span><button class="col-dd-btn" data-col="tier" tabindex="-1">⌄</button></div></th>
+              <th data-col="confidence"><div class="th-inner"><span>Conf</span><button class="col-dd-btn" data-col="confidence" tabindex="-1">⌄</button></div></th>
+              <th data-col="hold"><div class="th-inner"><span>Hold</span><button class="col-dd-btn" data-col="hold" tabindex="-1">⌄</button></div></th>
+              <th data-col="trade_id"><div class="th-inner"><span>ID</span><button class="col-dd-btn" data-col="trade_id" tabindex="-1">⌄</button></div></th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -647,6 +615,21 @@
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
-<script src="/static/app.js?v=11"></script>
+<!-- Column filter dropdown (shared, repositioned on open) -->
+<div id="col-dd" class="col-dd" style="display:none">
+  <div class="col-dd-sorts">
+    <button class="col-dd-sort-btn" data-dir="asc" title="Sort ascending">↑ Asc</button>
+    <button class="col-dd-sort-btn" data-dir="desc" title="Sort descending">↓ Desc</button>
+  </div>
+  <div class="col-dd-divider"></div>
+  <input class="col-dd-search" id="col-dd-search" placeholder="Search…" autocomplete="off"/>
+  <div class="col-dd-list" id="col-dd-list"></div>
+  <div class="col-dd-footer">
+    <button class="col-dd-footer-btn" id="col-dd-clear">Clear</button>
+    <button class="col-dd-footer-btn col-dd-selectall" id="col-dd-selectall">Select All</button>
+  </div>
+</div>
+
+<script src="/static/app.js?v=13"></script>
 </body>
 </html>

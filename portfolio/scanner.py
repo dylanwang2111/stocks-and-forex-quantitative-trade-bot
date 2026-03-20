@@ -287,7 +287,7 @@ class Scanner:
                 if ema50_s is not None and not ema50_s.empty and pd.notna(ema50_s.iloc[-1]):
                     ema50_val = float(ema50_s.iloc[-1])
         except Exception:
-            pass
+            logger.debug("scan: ATR/EMA50 fetch failed for %s — proceeding without", symbol, exc_info=True)
 
         # Step 5: Signal engine
         try:

@@ -5,7 +5,28 @@
       "Bash(pip3 install:*)",
       "Bash(pip3 show:*)",
       "Bash(pip3:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(python:*)",
+      "Bash(echo === CYCLE COUNT ===:*)",
+      "Bash(__NEW_LINE_f54537961f156d10__ echo:*)",
+      "Bash(git stash:*)",
+      "Bash(wc:*)",
+      "Bash(pip install:*)",
+      "Bash(pip show:*)",
+      "Bash(pgrep -af \"python.*main.py\" 2>/dev/null; ls logs/ 2>/dev/null | tail -5)",
+      "Bash(kill 5639 51448 2>/dev/null; sleep 1; pgrep -af \"python.*main.py\" 2>/dev/null && echo \"still running\" || echo \"stopped\")",
+      "Bash(pkill -f \"python main.py --mode paper\" && echo \"killed\")",
+      "Bash(pkill -f \"python main.py\" && echo \"killed\")",
+      "Bash(pgrep -a -f \"main.py\" 2>/dev/null; echo \"exit:$?\")",
+      "Bash(pkill -f \"python main.py\" 2>/dev/null; sleep 1; python main.py --mode paper >> logs/paper_20260312.log 2>&1)",
+      "Bash(pkill -f \"python main.py\" 2>/dev/null; true)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(echo \"=== RUFF ===\" && ruff check agents/ --output-format=concise 2>&1\necho \"=== BANDIT ===\" && bandit -r agents/ -ll 2>&1\necho \"=== MYPY ===\" && mypy agents/ --ignore-missing-imports --no-error-summary 2>&1)",
+      "Bash(conda install:*)",
+      "Bash(curl -v \"http://localhost:5001/api/trades?page_size=1\")",
+      "Bash(curl:*)"
     ]
   }
 }
