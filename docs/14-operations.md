@@ -1,12 +1,27 @@
 # Operations
 
-Day-to-day operating guide for running, monitoring, and maintaining the bot.
+Day-to-day operating guide for running, monitoring, and maintaining Trade Signet.
 
 ---
 
-## Starting the Bot
+## manage.sh — Recommended Interface
 
-Always log to a date-stamped file:
+`manage.sh` is the preferred way to start, stop, restart, and check status:
+
+```bash
+./manage.sh start              # start bot + dashboard
+./manage.sh stop               # stop  bot + dashboard
+./manage.sh restart            # restart both
+./manage.sh restart bot        # restart bot only
+./manage.sh restart dashboard  # restart dashboard only
+./manage.sh status             # show PIDs
+```
+
+Logs are written to `logs/paper_YYYYMMDD.log` (bot) and `logs/dashboard_YYYYMMDD.log` (dashboard).
+
+---
+
+## Starting the Bot (Manual)
 
 ```bash
 python main.py --mode paper >> logs/paper_$(date +%Y%m%d).log 2>&1 &
@@ -29,7 +44,10 @@ tail -20 logs/paper_YYYYMMDD.log
 # Check open positions
 sqlite3 trade_bot.db "SELECT id, symbol, direction, entry_price, quantity FROM trades WHERE status='open';"
 
-# Stop the bot
+# Stop via manage.sh (recommended)
+./manage.sh stop bot
+
+# Or manually
 kill <PID>
 ```
 
@@ -40,17 +58,14 @@ Open positions are NOT closed on shutdown — they persist in the DB and are res
 ## Restarting the Bot
 
 ```bash
-# 1. Find current PID
-ps aux | grep "python main.py" | grep -v grep
+# Recommended
+./manage.sh restart bot
 
-# 2. Kill it
-kill <PID>
-sleep 3
-
-# 3. Restart with log
+# Manual
+kill <PID> && sleep 2
 python main.py --mode paper >> logs/paper_$(date +%Y%m%d).log 2>&1 &
 
-# 4. Verify positions restored
+# Verify positions restored
 grep "restore_from_db" logs/paper_$(date +%Y%m%d).log | tail -5
 ```
 

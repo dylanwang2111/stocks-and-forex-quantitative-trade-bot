@@ -1,17 +1,20 @@
-# Dashboard
+# Dashboard (Trade Signet)
 
-The dashboard is a FastAPI + single-page application served from `dashboard_v2.py`. It reads the same SQLite database as the trading bot and does not interfere with trading.
+The Trade Signet dashboard is a FastAPI + single-page application served from `dashboard_v2.py`. It reads the same SQLite database as the trading bot and does not interfere with trading.
 
 ---
 
 ## Starting the Dashboard
 
 ```bash
-# Recommended — date-stamped log
-python -m uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 >> logs/dashboard.log 2>&1 &
+# Recommended — via manage.sh
+./manage.sh start dashboard        # start only dashboard
+./manage.sh start                  # start bot + dashboard
+./manage.sh restart dashboard      # restart dashboard only
+./manage.sh status                 # show running PIDs
 
-# Or via main.py
-python main.py --mode dashboard_v2
+# Manual
+uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 >> logs/dashboard_$(date +%Y%m%d).log 2>&1 &
 ```
 
 Open `http://localhost:8050` in a browser.
@@ -22,12 +25,16 @@ The dashboard reloads each page on navigation and has a 60-second auto-refresh t
 
 ## Appearance
 
+### Branding
+
+The platform is named **Trade Signet**. The navbar displays the wax-seal emblem (SVG at `static/favicon.svg`) alongside the *Trade Signet* wordmark in Playfair Display italic.
+
 ### Dark Mode
 
-A **settings button** (gear icon, top-right of the nav bar) opens a preferences panel with a dark-mode toggle. The theme is persisted in `localStorage` and applied on every load without flash (FOUC-prevented via inline `<head>` script).
+A **settings button** (gear icon, top-right of the nav bar) opens a preferences panel with a dark-mode toggle. The theme is persisted in `localStorage` under the key `trade-signet-theme` and applied on every load without flash (FOUC-prevented via inline `<head>` script).
 
-- Light: warm parchment / ink tones
-- Dark: "Midnight Obsidian" — deep charcoal background, gold accents
+- Light: antique vellum (`#F2EDE2`) with warm ivory cards, bottle-green and claret accents, antique gold (`#8A5C00`) active indicator
+- Dark: deep charcoal background, gold accents
 
 ### Charts
 
@@ -103,7 +110,7 @@ Full table of all open positions.
 | To Stop% | Distance from current price to stop as % (positive = not yet hit) |
 | To TP% | Distance from current price to TP as % |
 | TP Progress | Progress bar: % of the entry→TP range covered; >100% = past target |
-| Unreal P&L | (current − entry) × qty; negative = loss |
+| Unreal P&L | USD P&L: for stocks/non-USD forex `(current − entry) × qty`; for USD-base forex (USDJPY, USDCHF, USDCAD) `(current − entry) / current × qty` to convert from quote currency to USD |
 | Qty | Units held |
 | Held | Trading days held (see note below) |
 | Left | `SWING_HOLDING_DAYS − Held` |

@@ -122,6 +122,9 @@ class BotConfig:
     swing_holding_days: int = field(
         default_factory=lambda: int(os.getenv("SWING_HOLDING_DAYS", "7"))
     )
+    allow_short_stocks: bool = field(
+        default_factory=lambda: os.getenv("ALLOW_SHORT_STOCKS", "false").lower() == "true"
+    )
 
     @property
     def cash_reserve(self) -> float:

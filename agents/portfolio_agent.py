@@ -136,7 +136,7 @@ class PortfolioAgent:
     MAX_FOREX: int   = settings.bot.max_forex
     MAX_CRYPTO: int  = settings.bot.max_crypto
     MIN_BARS: int    = 20
-    MAX_PER_SECTOR: int = 2   # max stocks from any single sector
+    MAX_PER_SECTOR: int = 3   # max stocks from any single sector
 
     def _bulk_fetch(self) -> dict[str, pd.DataFrame]:
         result = self._bulk_fetch_yfinance()
@@ -385,7 +385,6 @@ class PortfolioAgent:
             logger.info("  %-6s  score=%.2f  sector=%s", i.symbol, s, sector)
 
         # Sector-capped selection: at most MAX_PER_SECTOR stocks from any one sector.
-        # Correlation conflicts at trade time are handled by the scanner's CorrelationGuard.
         selected_stocks: list[Instrument] = []
         sector_counts: dict[str, int] = {}
 
@@ -484,15 +483,31 @@ class PortfolioAgent:
             if adx_col:
                 adx_val = float(adx_df[adx_col[0]].iloc[-1])
 
-        # ── Long-bias gate ─────────────────────────────────────────────────────
+        # ── Direction gate ──────────────────────────────────────────────────────
+        # Supports both long (uptrend) and short (downtrend) candidates.
+        # Stocks require full EMA stack alignment (EMA9/21/50) for either direction.
+        # Forex uses the softer EMA9 vs EMA21 gate only.
         if e9 is None or e21 is None:
             return None
-        if not (e9 > e21):
+
+        is_long = e9 > e21
+        is_bear = e9 < e21
+
+        if instrument.asset_type == "stock":
+            if e50 is None:
+                return None
+            if is_long and not (e21 > e50):
+                return None   # long stocks: need full bull stack EMA9 > EMA21 > EMA50
+            if is_bear and not (e21 < e50):
+                return None   # short stocks: need full bear stack EMA9 < EMA21 < EMA50
+
+        if not (is_long or is_bear):
             return None
 
         # ── 1. Technical score (0–6) ───────────────────────────────────────────
         tech_score = 0.0
 
+        # ADX: direction-agnostic trend strength
         if adx_val is not None and adx_val > 25:
             tech_score += 1.0
             if adx_val > 40:
@@ -500,11 +515,16 @@ class PortfolioAgent:
 
         if len(close) >= 20:
             ret_20d = float(close.iloc[-1] / close.iloc[-20] - 1.0)
-            if ret_20d > 0.02:
+            if is_long and ret_20d > 0.02:
+                tech_score += 1.0
+            elif is_bear and ret_20d < -0.02:
                 tech_score += 1.0
 
-        if rsi_val is not None and 45 <= rsi_val <= 70:
-            tech_score += 1.0
+        if rsi_val is not None:
+            if is_long and 45 <= rsi_val <= 70:
+                tech_score += 1.0
+            elif is_bear and 30 <= rsi_val <= 55:
+                tech_score += 1.0
 
         if instrument.asset_type == "stock" and not volume.empty:
             avg_vol = float(volume.rolling(20).mean().iloc[-1])
@@ -518,16 +538,18 @@ class PortfolioAgent:
                 if 0.003 <= atr_pct <= 0.06:
                     tech_score += 1.0
 
-        # ── 2. Fundamental score (0–4, stocks only) ───────────────────────────
+        # ── 2. Fundamental score (0–4, stocks only, long candidates only) ──────
+        # Fundamentals reward quality longs. For shorts we skip — a downtrend in a
+        # fundamentally good stock is still worth trading.
         fund_score = 0.0
-        if instrument.asset_type == "stock":
+        if instrument.asset_type == "stock" and is_long:
             fund = self._fetch_fundamentals(instrument.symbol)
 
             pe = fund.get("pe")
             if pe is not None and 0 < pe <= _PE_GOOD_MAX:
                 fund_score += 1.0
                 if pe <= _PE_GREAT_MAX:
-                    fund_score += 1.0   # great valuation bonus
+                    fund_score += 1.0
 
             roa = fund.get("roa")
             if roa is not None and roa >= _ROA_GOOD:
@@ -537,45 +559,60 @@ class PortfolioAgent:
             if margin is not None and margin >= _MARGIN_GOOD:
                 fund_score += 1.0
 
-            # EPS growth (forward momentum in earnings)
             eps_g = fund.get("eps_growth")
             if eps_g is not None and eps_g >= _EPS_GROWTH:
-                fund_score += 0.5   # half-point: useful but uncertain
+                fund_score += 0.5
 
-        # ── 3. Macro context bonus (0–3, sector-specific) ─────────────────────
+        # ── 3. Macro context bonus (0–3, sector-specific, direction-aware) ─────
         macro_score = 0.0
         sector = _SECTOR.get(instrument.symbol, "other")
 
-        if sector == "gold":
-            if macro.gold_uptrend:
-                macro_score += 1.5   # gold price trend is the primary driver
-            if macro.vix >= _VIX_FEAR:
-                macro_score += 1.0   # fear environment = safe-haven demand for gold
-            if macro.vix >= _VIX_STRESS:
-                macro_score += 0.5   # extra bonus in crisis
-
-        elif sector == "energy":
-            if macro.oil_uptrend:
-                macro_score += 1.5   # oil price trend is the primary driver
-            if macro.vix >= _VIX_FEAR:
-                macro_score += 0.5   # mild inflation-hedge bid during uncertainty
-
-        elif sector == "tech":
-            if macro.vix < _VIX_FEAR:
-                macro_score += 1.0   # risk-on benefits growth/tech
-            if macro.vix >= _VIX_STRESS:
-                macro_score -= 1.0   # crisis = tech selloff penalty
-
-        elif sector == "broad":
-            # Broad ETFs get a small bonus when either gold or oil is in uptrend
-            # (commodity-equity divergence signals regime change)
-            if macro.gold_uptrend or macro.oil_uptrend:
-                macro_score += 0.5
+        if is_long:
+            if sector == "gold":
+                if macro.gold_uptrend:
+                    macro_score += 1.5
+                if macro.vix >= _VIX_FEAR:
+                    macro_score += 1.0
+                if macro.vix >= _VIX_STRESS:
+                    macro_score += 0.5
+            elif sector == "energy":
+                if macro.oil_uptrend:
+                    macro_score += 1.5
+                if macro.vix >= _VIX_FEAR:
+                    macro_score += 0.5
+            elif sector == "tech":
+                if macro.vix < _VIX_FEAR:
+                    macro_score += 1.0
+                if macro.vix >= _VIX_STRESS:
+                    macro_score -= 1.0
+            elif sector == "broad":
+                if macro.gold_uptrend or macro.oil_uptrend:
+                    macro_score += 0.5
+        else:  # bear
+            if sector == "gold":
+                if not macro.gold_uptrend:
+                    macro_score += 1.5   # gold downtrend favours short gold names
+                if macro.vix < _VIX_FEAR:
+                    macro_score += 0.5   # risk-on = no safe-haven bid
+            elif sector == "energy":
+                if not macro.oil_uptrend:
+                    macro_score += 1.5   # oil downtrend favours short energy names
+                if macro.vix < _VIX_FEAR:
+                    macro_score += 0.5
+            elif sector == "tech":
+                if macro.vix >= _VIX_FEAR:
+                    macro_score += 1.0   # fear = tech selloff
+                if macro.vix >= _VIX_STRESS:
+                    macro_score += 0.5
+            elif sector == "broad":
+                if not macro.gold_uptrend and not macro.oil_uptrend:
+                    macro_score += 0.5
 
         total_score = tech_score + fund_score + macro_score
+        direction_tag = "long" if is_long else "short"
         logger.debug(
-            "  %s: tech=%.1f fund=%.1f macro=%.1f total=%.2f [%s]",
-            instrument.symbol, tech_score, fund_score, macro_score, total_score, sector,
+            "  %s [%s]: tech=%.1f fund=%.1f macro=%.1f total=%.2f [%s]",
+            instrument.symbol, direction_tag, tech_score, fund_score, macro_score, total_score, sector,
         )
         return total_score
 

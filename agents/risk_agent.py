@@ -134,6 +134,16 @@ _ATR_TP_MULT_BY_TIER_FOREX: dict[str, float] = {
 
 _TARGET_ATR_PCT = 0.02   # target 2% ATR exposure per position (for vol scaling)
 
+# Risk multiplier by position tier — scales the per-trade risk cap so
+# high-conviction trades (LARGE/FULL) are allowed to risk proportionally more.
+# Base: RISK_PER_TRADE from settings (default 3%).  SMALL=2.25%, LARGE=4.5%, FULL=6%.
+_RISK_TIER_MULT: dict[str, float] = {
+    "SMALL":  0.75,
+    "MEDIUM": 1.0,
+    "LARGE":  1.5,
+    "FULL":   2.0,
+}
+
 # Forex position multiplier — applied before vol/EVZ reduction.
 # Compensates for forex's tiny pip moves: at 1× a SMALL EURUSD position is ~100 units;
 # at 2× it reaches ~200 units, still well within the per-broker risk cap.
@@ -305,14 +315,14 @@ class RiskAgent:
             logger.warning("RiskAgent: %s current_price=%.6f is non-positive", symbol, current_price)
             return None
 
-        # All forex pairs: quantity = position_size_usd / current_price
-        # EURUSD @ 1.08: 1 unit = 1 EUR ≈ $1.08 → qty = usd / 1.08
-        # USDJPY @ 150:  1 unit = 1 USD → qty = usd / 150 × 150 = usd ... wait,
-        # OANDA: for USDJPY 1 unit = 1 unit of base (USD), so cost in USD = qty * 1
-        # but price is in JPY, so position_size_usd / price gives qty in JPY terms —
-        # use standard formula for all pairs: qty = position_size_usd / current_price
-        # For USDJPY this gives units where cost_basis = qty * price (in USD equivalent)
-        raw_qty = position_size_usd / current_price
+        # For USD-base forex pairs (USDJPY, USDCAD, USDCHF): 1 OANDA unit = 1 USD of base
+        # → quantity = position_size_usd (NOT divided by price)
+        # For non-USD-base pairs (EURUSD, GBPUSD, AUDUSD, NZDUSD): 1 unit = 1 base currency
+        # → quantity = position_size_usd / price (standard formula)
+        if instrument.asset_type == "forex" and symbol.upper().startswith("USD"):
+            raw_qty = position_size_usd
+        else:
+            raw_qty = position_size_usd / current_price
         quantity = self._round_quantity(raw_qty, instrument.asset_type)
 
         # ── Guard: quantity rounded to zero ───────────────────────────────
@@ -323,7 +333,12 @@ class RiskAgent:
             return None
 
         # ── Step 6: recompute position_size_usd after rounding ────────────
-        position_size_usd = quantity * current_price
+        # For USD-base forex: position value = quantity (1 unit = 1 USD)
+        # For all others: position value = quantity * price
+        if instrument.asset_type == "forex" and symbol.upper().startswith("USD"):
+            position_size_usd = quantity
+        else:
+            position_size_usd = quantity * current_price
 
         # Step 7: stop and take-profit prices (ATR-based when available, fixed % fallback)
         direction = confidence_result.direction
@@ -366,12 +381,25 @@ class RiskAgent:
 
         # ── Step 8: risk in dollars ────────────────────────────────────────
         stop_distance = abs(entry_price - stop_price)
-        risk_dollars  = stop_distance * quantity
+        # For USD-base forex pairs (USDJPY, USDCHF, USDCAD), stop_distance is in
+        # the quote currency (JPY, CHF, CAD).  1 OANDA unit = 1 USD base, so the
+        # USD risk per unit = stop_distance / entry_price (quote units → USD).
+        # For all other instruments, price_diff × qty is already in USD.
+        _is_usd_base_forex = (instrument.asset_type == "forex" and symbol.upper().startswith("USD"))
+        if _is_usd_base_forex:
+            risk_dollars = (stop_distance / entry_price) * quantity
+        else:
+            risk_dollars = stop_distance * quantity
 
         # ── Step 9: cap risk at MAX_RISK_USD (per-broker pool) ────────────
-        max_risk_usd = broker_cap * settings.bot.risk_per_trade
+        # Scale risk cap by position tier — LARGE/FULL trades are allowed to risk more.
+        tier_risk_mult = _RISK_TIER_MULT.get(tier.value, 1.0)
+        max_risk_usd = broker_cap * settings.bot.risk_per_trade * tier_risk_mult
         if risk_dollars > max_risk_usd:
-            capped_qty = max_risk_usd / stop_distance
+            if _is_usd_base_forex:
+                capped_qty = max_risk_usd / (stop_distance / entry_price)
+            else:
+                capped_qty = max_risk_usd / stop_distance
             # Floor (not round) so risk_dollars never exceeds MAX_RISK_USD after rounding
             quantity   = self._floor_quantity(capped_qty, instrument.asset_type)
 
@@ -382,8 +410,12 @@ class RiskAgent:
                 return None
 
             # Recompute derived values after cap
-            position_size_usd = quantity * current_price
-            risk_dollars      = stop_distance * quantity
+            if _is_usd_base_forex:
+                position_size_usd = quantity
+                risk_dollars      = (stop_distance / entry_price) * quantity
+            else:
+                position_size_usd = quantity * current_price
+                risk_dollars      = stop_distance * quantity
 
         # ── Emit DEBUG log ─────────────────────────────────────────────────
         logger.debug(

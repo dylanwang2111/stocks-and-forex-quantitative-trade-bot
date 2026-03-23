@@ -826,6 +826,43 @@ class Orchestrator:
                         logger.error("Exit failed for %s: %s", symbol, result.error)
                     continue
 
+            # ── Stale-trade exit (48 h, price hasn't moved in signal direction) ──
+            # Free up capital locked in flat positions that never developed.
+            # Fires if held ≥ 48 hours AND price is still within 0.3% of entry
+            # in our favour — the trade simply isn't working.
+            if current_price is not None:
+                held_hours = (now_utc - position.entry_time).total_seconds() / 3600
+                if held_hours >= 48:
+                    pnl_pct = (
+                        (current_price - position.entry_price) / position.entry_price
+                        if position.direction == "long"
+                        else (position.entry_price - current_price) / position.entry_price
+                    )
+                    if pnl_pct < 0.003:  # hasn't moved 0.3% in our direction
+                        logger.info(
+                            "Exit: %s stale after %.0fh — pnl_pct=%.3f%% < 0.3%%, closing.",
+                            symbol, held_hours, pnl_pct * 100,
+                        )
+                        result = self._exec_agent.close_position(
+                            position=position,
+                            reason="stale_exit",
+                            fill_price=current_price,
+                        )
+                        if result.success:
+                            self._record_closed_trade_outcome(position, result)
+                            if result.filled_price is not None:
+                                self._notifier.notify_trade_closed(
+                                    symbol=symbol,
+                                    direction=position.direction,
+                                    entry_price=position.entry_price,
+                                    exit_price=result.filled_price,
+                                    quantity=position.quantity,
+                                    reason="stale_exit",
+                                )
+                        else:
+                            logger.error("Stale-exit failed for %s: %s", symbol, result.error)
+                        continue
+
             # ── Time-based exit ────────────────────────────────────────────
             if held_days >= self._swing_holding_days:
                 logger.info(
@@ -962,6 +999,12 @@ class Orchestrator:
         if asset_type == "crypto" and confidence_result.direction == "short":
             logger.debug("_attempt_entry: %s short skipped — crypto is long-only", symbol)
             return
+
+        # ── Guard: stock short requires ALLOW_SHORT_STOCKS=true ───────────────
+        if asset_type == "stock" and confidence_result.direction == "short":
+            if not settings.bot.allow_short_stocks:
+                logger.debug("_attempt_entry: %s short skipped — ALLOW_SHORT_STOCKS=false", symbol)
+                return
 
         blocked, block_reason = self._event_guard.is_blocked(symbol, asset_type)
         if blocked:

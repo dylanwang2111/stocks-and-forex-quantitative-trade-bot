@@ -21,7 +21,7 @@ The top-level controller. Owns the APScheduler loop, coordinates all other agent
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `SCAN_INTERVAL_MINUTES` | 15 | Scan cycle frequency |
-| `SWING_HOLDING_DAYS` | 5 | Force-close after N days |
+| `SWING_HOLDING_DAYS` | 7 | Force-close after N days |
 | `CB_DAILY_LOSS_PCT` | 0.03 | Circuit breaker: 3% daily loss |
 | `CB_CONSECUTIVE_LOSSES` | 5 | Circuit breaker: 5 consecutive losses |
 
@@ -56,12 +56,32 @@ def scan_and_trade():
 
 ### Exit Conditions (checked every 15 min)
 
+Exits operate in two phases per position:
+
+**Phase 1** — price has not yet reached TP:
+
 | Condition | Trigger | Reason Tag |
 |-----------|---------|------------|
 | Stop-loss hit | price ≤ stop_price (long) or price ≥ stop_price (short) | `stop_loss` |
 | Take-profit hit | price ≥ tp_price (long) or price ≤ tp_price (short) | `take_profit` |
-| Signal reversal | EMA9 crosses against direction on 1h (after ≥1 day held) | `signal_exit` |
+
+When TP is breached on **2 consecutive cycles** (confirmation guard against single-candle spikes), the position enters Phase 2.
+
+**Phase 2** — price has blown past TP (let the winner run):
+
+| Condition | Trigger | Reason Tag |
+|-----------|---------|------------|
+| Trailing stop hit | Trailing stop at 2.1×ATR ratchets behind price; only moves in profitable direction | `trailing_stop` |
+
+The hard TP is no longer used as an exit in Phase 2. `stop_price` becomes the trailing stop and is updated each cycle.
+
+**Backstops (apply in both phases):**
+
+| Condition | Trigger | Reason Tag |
+|-----------|---------|------------|
+| Stale trade | Held ≥ 48h AND price moved < 0.3% in signal direction | `stale_exit` |
 | Max hold time | Position held ≥ `SWING_HOLDING_DAYS` | `time_exit` |
+| Signal reversal | EMA9 crosses against direction on 1h (after ≥1 day held) | `signal_exit` |
 
 ### Circuit Breaker
 
@@ -228,7 +248,9 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 
 8. quantity = position_usd / entry_price
    → Stocks: round to 4 decimal places (fractional shares)
-   → Forex:  round to nearest integer (OANDA units)
+   → Forex (non-USD-base, e.g. EURUSD, GBPUSD): round to nearest integer (OANDA units)
+   → Forex (USD-base, e.g. USDJPY, USDCHF, USDCAD): quantity = position_usd directly
+     (1 OANDA unit of a USD-base pair = 1 USD of base, so no price division)
 
 9. Compute stops and take-profits:
    ATR-based (preferred):
@@ -236,16 +258,24 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
      Long TP    = entry + ATR_TP_MULT × atr
      Short stop = entry + ATR_SL_MULT × atr
      Short TP   = entry - ATR_TP_MULT × atr
+   Forex minimum stop floor:
+     sl_dist = max(sl_dist, entry × 0.4%)   — prevents stops too tight for hourly noise
    Fixed % (fallback when ATR unavailable):
      stop = entry ± 1.5%
      tp   = entry ± 3.0%   (2:1 reward-to-risk)
 
-10. risk_dollars = |entry - stop| × quantity
+10. risk_dollars:
+    - Stocks / non-USD-base forex: |entry - stop| × quantity
+    - USD-base forex (USDJPY, USDCHF, USDCAD): (|entry - stop| / entry) × quantity
+      ⚠️ For USD-base pairs, stop distance is in the quote currency (JPY, CHF, CAD).
+      Dividing by entry_price converts it to USD before multiplying by quantity (in USD units).
 
 11. Risk cap enforcement:
-    max_risk = broker_cap × RISK_PER_TRADE  (3%)
+    max_risk = broker_cap × RISK_PER_TRADE  (1%)
     if risk_dollars > max_risk:
-        scale quantity down: qty = floor(max_risk / |entry - stop|, 4 decimals)
+        USD-base forex: capped_qty = max_risk / (|entry - stop| / entry)
+        all others:     capped_qty = max_risk / |entry - stop|
+        quantity = floor(capped_qty)
         recompute position_usd, risk_dollars
 ```
 
@@ -256,18 +286,32 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 | Asset Type | SL Multiplier |
 |------------|---------------|
 | Stock | 2.0× ATR |
-| Forex | 1.5× ATR |
+| Forex | 3.0× ATR |
+| Crypto | 2.0× ATR |
 
-**Take-profit** multipliers scale with position tier (higher conviction = wider TP):
+**Take-profit** multipliers scale with position tier. Forex uses larger multiples because its ATR% (~0.05–0.10% per 1h bar) is ~10–20× smaller than stocks (0.5–2%):
+
+**Stocks / Crypto:**
 
 | Position Tier | TP Multiplier |
 |---------------|---------------|
-| SMALL (55–59) | 4.0× ATR |
-| MEDIUM (60–69) | 5.0× ATR |
-| LARGE (70–79) | 6.0× ATR |
-| FULL (≥ 80) | 6.5× ATR |
+| SMALL  | 4.0× ATR |
+| MEDIUM | 5.0× ATR |
+| LARGE  | 6.0× ATR |
+| FULL   | 6.5× ATR |
 
-This means a FULL-confidence trade has a 3.25:1 R:R (stock) or 4.33:1 R:R (forex), while a SMALL trade has 2:1 (stock) or 2.67:1 (forex).
+**Forex:**
+
+| Position Tier | TP Multiplier |
+|---------------|---------------|
+| SMALL  | 10.0× ATR |
+| MEDIUM | 12.0× ATR |
+| LARGE  | 14.0× ATR |
+| FULL   | 15.0× ATR |
+
+**Forex size multiplier**: `_FOREX_SIZE_MULT = 1.5×` is applied before EVZ/ATR vol reduction to compensate for forex's small pip moves.
+
+**Forex minimum stop**: `entry × 0.4%` floor prevents stops that are too tight to survive normal 1h noise (e.g. < 63 pips USDJPY).
 
 ### RiskParams Output
 

@@ -1,3 +1,45 @@
+/* ── Column-header tooltip (1.5s hover delay, body-level div) ──────────────── */
+(function () {
+  const tip = document.createElement('div');
+  tip.id = 'col-tooltip';
+  document.body.appendChild(tip);
+
+  let timer = null;
+
+  document.addEventListener('mouseover', function (e) {
+    const th = e.target.closest('th[data-tip]');
+    if (!th) return;
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      const rect = th.getBoundingClientRect();
+      tip.textContent = th.dataset.tip;
+
+      // Position below the th, horizontally centred
+      const centreX = rect.left + rect.width / 2;
+      tip.style.top  = (rect.bottom + 6) + 'px';
+      tip.style.left = centreX + 'px';
+      tip.style.transform = 'translateX(-50%)';
+
+      // Clamp so it doesn't overflow the right edge
+      tip.classList.add('visible');
+      const tipRect = tip.getBoundingClientRect();
+      if (tipRect.right > window.innerWidth - 8) {
+        tip.style.left = (window.innerWidth - 8 - tipRect.width / 2) + 'px';
+      }
+      if (tipRect.left < 8) {
+        tip.style.left = (8 + tipRect.width / 2) + 'px';
+      }
+    }, 1500);
+  });
+
+  document.addEventListener('mouseout', function (e) {
+    const th = e.target.closest('th[data-tip]');
+    if (!th) return;
+    clearTimeout(timer);
+    tip.classList.remove('visible');
+  });
+})();
+
 /* ── XSS escape helper ─────────────────────────────────────────────────────── */
 function esc(s) {
   if (s == null) return '';
@@ -82,7 +124,7 @@ function setDark(enable) {
   const html = document.documentElement;
   html.classList.add('transitioning');
   html.classList.toggle('dark', enable);
-  localStorage.setItem('tradebot-theme', enable ? 'dark' : 'light');
+  localStorage.setItem('trade-signet-theme', enable ? 'dark' : 'light');
   const icon = document.getElementById('dm-icon');
   if (icon) icon.textContent = enable ? '☀' : '☽';
   updateChartDefaults();
@@ -465,7 +507,10 @@ function _renderOvPositionsFull(data) {
         </div>
       </td>
       <td class="${pnlClass(p.unrealized_pnl)}">${fmtUSD(p.unrealized_pnl)}</td>
-      <td>${fmtNum(p.quantity, 4)}</td>
+      <td>
+        <span style="font-family:var(--mono)">${fmtNum(p.quantity, 4)}</span>
+        ${p.size_usd != null ? `<br><span style="font-size:10px;color:var(--text-sub)">${fmtUSD(p.size_usd)}</span>` : ''}
+      </td>
       <td>${p.days_held ?? '—'}</td>
       <td class="${daysLeftCls}">${p.days_left ?? '—'}</td>
       <td>${tierBadge(p.position_tier)}</td>
@@ -563,7 +608,10 @@ async function renderPositions() {
         </div>
       </td>
       <td class="${pnlClass(p.unrealized_pnl)}">${fmtUSD(p.unrealized_pnl)}</td>
-      <td>${fmtNum(p.quantity, 4)}</td>
+      <td>
+        <span style="font-family:var(--mono)">${fmtNum(p.quantity, 4)}</span>
+        ${p.size_usd != null ? `<br><span style="font-size:10px;color:var(--text-sub)">${fmtUSD(p.size_usd)}</span>` : ''}
+      </td>
       <td>${p.days_held ?? '—'}</td>
       <td class="${daysLeftCls}">${p.days_left ?? '—'}</td>
       <td>${tierBadge(p.position_tier)}</td>

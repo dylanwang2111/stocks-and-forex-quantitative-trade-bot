@@ -67,7 +67,7 @@ DATABASE_URL=sqlite:///trade_bot.db
 ### 4. Run as systemd Service
 
 ```bash
-sudo nano /etc/systemd/system/tradebot.service
+sudo nano /etc/systemd/system/trade-signet.service
 ```
 
 ```ini
@@ -91,9 +91,9 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable tradebot
-sudo systemctl start tradebot
-sudo systemctl status tradebot
+sudo systemctl enable trade-signet
+sudo systemctl start trade-signet
+sudo systemctl status trade-signet
 ```
 
 ---
@@ -104,14 +104,14 @@ sudo systemctl status tradebot
 
 ```bash
 # Paper trading bot
-docker compose up -d tradebot
+docker compose up -d trade-signet
 
 # Dashboard
 docker compose up -d dashboard
 # Open http://your-server:8050
 
 # View logs
-docker compose logs -f tradebot
+docker compose logs -f trade-signet
 
 # Stop
 docker compose down
@@ -123,7 +123,7 @@ docker compose down
 version: '3.8'
 
 services:
-  tradebot:
+  trade-signet:
     build: .
     restart: unless-stopped
     env_file: .env
@@ -197,7 +197,7 @@ cat /etc/resolv.conf | grep nameserver | awk '{print $2}'
 
 ```bash
 # 1. Stop paper bot
-sudo systemctl stop tradebot  # or kill the process
+sudo systemctl stop trade-signet  # or kill the process
 
 # 2. Update .env
 TRADING_MODE=live
@@ -205,7 +205,7 @@ IBKR_PORT=4001               # live port
 OANDA_ENVIRONMENT=live
 
 # 3. Restart
-sudo systemctl start tradebot
+sudo systemctl start trade-signet
 ```
 
 The bot will prompt for confirmation on startup in live mode:
@@ -236,13 +236,13 @@ sudo apt install postgresql postgresql-contrib
 
 # Create database
 sudo -u postgres psql
-CREATE DATABASE tradebot;
+CREATE DATABASE trade_signet;
 CREATE USER tradebotuser WITH PASSWORD 'yourpassword';
-GRANT ALL PRIVILEGES ON DATABASE tradebot TO tradebotuser;
+GRANT ALL PRIVILEGES ON DATABASE trade_signet TO tradebotuser;
 \q
 
 # Update .env
-DATABASE_URL=postgresql://tradebotuser:yourpassword@localhost/tradebot
+DATABASE_URL=postgresql://tradebotuser:yourpassword@localhost/trade_signet
 ```
 
 The schema is created automatically on first run. No manual migration needed for fresh installs.
@@ -254,7 +254,7 @@ The schema is created automatically on first run. No manual migration needed for
 Prevent logs from filling the disk:
 
 ```bash
-sudo nano /etc/logrotate.d/tradebot
+sudo nano /etc/logrotate.d/trade-signet
 ```
 
 ```
@@ -282,7 +282,7 @@ git pull
 sqlite3 trade_bot.db "SELECT symbol, direction, entry_price FROM trades WHERE status='open';"
 
 # Restart (open positions are restored automatically)
-sudo systemctl restart tradebot
+sudo systemctl restart trade-signet
 ```
 
 The bot's `restore_from_db()` mechanism reloads all open positions (with their stop/TP levels) on every startup. No positions are lost during updates.

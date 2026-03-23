@@ -29,7 +29,7 @@ RISK_PER_TRADE=0.03          # 3% of broker pool per trade
 # ── Trading Parameters ───────────────────────────────────────────────────────
 MIN_CONFIDENCE=55            # Entry threshold (SMALL tier)
 MAX_POSITIONS=2              # Max concurrent open positions
-SWING_HOLDING_DAYS=5         # Force-close after this many days
+SWING_HOLDING_DAYS=7         # Force-close after this many days
 
 # ── IBKR ─────────────────────────────────────────────────────────────────────
 IBKR_ACCOUNT_ID=             # Your paper/live account number
@@ -52,7 +52,7 @@ TELEGRAM_CHAT_ID=
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL=sqlite:///trade_bot.db   # SQLite (default)
-# DATABASE_URL=postgresql://user:pass@localhost/tradebot  # PostgreSQL (prod)
+# DATABASE_URL=postgresql://user:pass@localhost/trade_signet  # PostgreSQL (prod)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL=INFO
@@ -89,7 +89,7 @@ settings.telegram.enabled      # bool (True if token + chat_id both set)
 | `risk_per_trade` | `0.03` | Max risk per trade (fraction of broker pool) |
 | `min_confidence` | `55` | Minimum score to enter (SMALL tier) |
 | `max_positions` | `2` | Max simultaneous positions |
-| `swing_holding_days` | `5` | Force-close after N days |
+| `swing_holding_days` | `7` | Force-close after N days |
 
 ### Helper Methods
 

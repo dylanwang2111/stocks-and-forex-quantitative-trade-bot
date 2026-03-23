@@ -94,7 +94,7 @@ These override price-based checks and fire on the same 15-minute cycle.
 
 | Backstop | Condition | Fill Price |
 |----------|-----------|------------|
-| **Time exit** | Held ≥ `SWING_HOLDING_DAYS` (default 5, configurable via env) | Current price |
+| **Time exit** | Held ≥ `SWING_HOLDING_DAYS` (default 7, configurable via env) | Current price |
 | **Signal reversal** | EMA9 crosses against position direction on 1h (held ≥ 1 day) | Current price |
 
 ---

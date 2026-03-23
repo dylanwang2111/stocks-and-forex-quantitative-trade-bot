@@ -308,10 +308,13 @@ def api_overview():
             except Exception:
                 pass
             if cp:
+                # For USD-base forex (USDJPY, USDCHF, USDCAD), 1 OANDA unit = 1 USD base.
+                # P&L in USD = (price_diff / current_price) × qty.
+                _usd_base = len(t.symbol) == 6 and t.symbol.upper().startswith("USD")
                 if t.direction == "long":
-                    total_unrealized += (cp - t.entry_price) * qty
+                    total_unrealized += ((cp - t.entry_price) / cp * qty if _usd_base else (cp - t.entry_price) * qty)
                 else:
-                    total_unrealized += (t.entry_price - cp) * qty
+                    total_unrealized += ((t.entry_price - cp) / cp * qty if _usd_base else (t.entry_price - cp) * qty)
         total_unrealized = round(total_unrealized, 2)
 
         with get_db() as db2:
@@ -437,10 +440,12 @@ def api_positions():
 
             unrealized = None
             if current_price and entry_price and quantity:
+                _usd_base = len(symbol) == 6 and symbol.upper().startswith("USD")
                 if direction == "long":
-                    unrealized = round((current_price - entry_price) * quantity, 2)
+                    diff = (current_price - entry_price) / current_price if _usd_base else (current_price - entry_price)
                 else:
-                    unrealized = round((entry_price - current_price) * quantity, 2)
+                    diff = (entry_price - current_price) / current_price if _usd_base else (entry_price - current_price)
+                unrealized = round(diff * quantity, 2)
 
             tp_progress = None
             if current_price and tp and entry_price:
@@ -518,6 +523,7 @@ def api_positions():
                 "tp_progress_pct":   tp_progress,
                 "unrealized_pnl":    unrealized,
                 "quantity":          quantity,
+                "size_usd":          round(quantity, 2) if (broker or "ibkr") == "oanda" and (symbol or "").upper().startswith("USD") else round((quantity or 0) * (entry_price or 0), 2),
                 "days_held":         days_held,
                 "days_left":         days_left,
                 "confidence":        round(confidence, 1) if confidence else None,
@@ -589,9 +595,12 @@ def api_positions():
             tp        = r["take_profit_price"]
 
             if ep and qty:
-                r["unrealized_pnl"] = round(
-                    (cp - ep) * qty if direction == "long" else (ep - cp) * qty, 2
-                )
+                _usd_base = len(r["symbol"]) == 6 and r["symbol"].upper().startswith("USD")
+                if _usd_base:
+                    diff = (cp - ep) / cp if direction == "long" else (ep - cp) / cp
+                else:
+                    diff = (cp - ep) if direction == "long" else (ep - cp)
+                r["unrealized_pnl"] = round(diff * qty, 2)
             if stop:
                 dist = (cp - stop) / cp if direction == "long" else (stop - cp) / cp
                 r["dist_stop_pct"] = round(dist * 100, 2)
@@ -684,7 +693,7 @@ def api_trades(
     symbol: str = Query(""),
     direction: str = Query(""),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
+    page_size: int = Query(50, ge=1, le=10000),
 ):
     from portfolio.watchlist import get_instrument as _get_inst
     def _asset_type(sym: str) -> str:
@@ -917,7 +926,7 @@ def api_run_optimizer():
 def api_optimization(
     strategy: str = Query(""),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
+    page_size: int = Query(50, ge=1, le=10000),
 ):
     try:
         with get_db() as db:

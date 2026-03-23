@@ -46,8 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--holding-days",
         type=int,
-        default=3,
-        help="Days to hold a position (default: 3)",
+        default=7,
+        help="Days to hold a position (default: 7)",
     )
     parser.add_argument(
         "--start",

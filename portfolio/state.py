@@ -56,7 +56,23 @@ class Position:
 
         Long:  (current - entry) * qty
         Short: (entry - current) * qty
+
+        For USD-base forex pairs (USDJPY, USDCHF, USDCAD): P&L is in the quote
+        currency (JPY/CHF/CAD), so divide by current_price to convert to USD.
         """
+        _is_usd_base = False
+        try:
+            from portfolio.watchlist import get_instrument
+            instr = get_instrument(self.symbol)
+            if instr.asset_type == "forex" and self.symbol.upper().startswith("USD"):
+                _is_usd_base = True
+        except Exception:
+            pass
+        if _is_usd_base:
+            if self.direction == "long":
+                return (current_price - self.entry_price) / current_price * self.quantity
+            else:
+                return (self.entry_price - current_price) / current_price * self.quantity
         if self.direction == "long":
             return (current_price - self.entry_price) * self.quantity
         else:  # short
@@ -65,7 +81,18 @@ class Position:
     # Convenience --------------------------------------------------------
 
     def cost_basis(self) -> float:
-        """Capital deployed for this position (entry_price * quantity)."""
+        """Capital deployed for this position in USD.
+
+        For USD-base forex pairs (USDJPY, USDCAD, USDCHF): 1 OANDA unit = 1 USD,
+        so deployed = quantity. For all others: deployed = entry_price * quantity.
+        """
+        try:
+            from portfolio.watchlist import get_instrument
+            instr = get_instrument(self.symbol)
+            if instr.asset_type == "forex" and self.symbol.upper().startswith("USD"):
+                return self.quantity
+        except Exception:
+            pass
         return self.entry_price * self.quantity
 
     def __repr__(self) -> str:
@@ -226,7 +253,7 @@ class PortfolioStateManager:
         else:  # short
             pnl_usd = (position.entry_price - exit_price) * position.quantity
 
-        cost_basis = position.entry_price * position.quantity
+        cost_basis = position.cost_basis()
         pnl_pct = pnl_usd / cost_basis if cost_basis != 0.0 else 0.0
 
         # Persist to DB
@@ -680,6 +707,8 @@ def test_portfolio_state() -> None:
     import tempfile, os
 
     db_path = os.path.join(tempfile.gettempdir(), "test_portfolio_state.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
     db_url = f"sqlite:///{db_path}"
 
     # Initialise tables
@@ -688,9 +717,10 @@ def test_portfolio_state() -> None:
 
     mgr = PortfolioStateManager(database_url=db_url)
 
-    # Confirm clean slate
-    assert mgr.available_cash() == 350.0, (
-        f"Expected 350.0, got {mgr.available_cash()}"
+    # Confirm clean slate — available cash = total_capital (no positions, no reserve)
+    total_cap = settings.bot.total_capital
+    assert mgr.available_cash() == total_cap, (
+        f"Expected {total_cap}, got {mgr.available_cash()}"
     )
     assert mgr.can_open_position("SPY"), "Should be able to open SPY on clean slate"
 
@@ -748,20 +778,17 @@ def test_portfolio_state() -> None:
     )
     mgr.add_position(pos2)
 
-    # deployed = 100 + 10.80 = 110.80
-    # available = 500 - 150 - 110.80 = 239.20
-    expected_cash = round(500.0 - 150.0 - (500.0 * 0.2) - (1.08 * 10.0), 6)
+    # deployed = SPY cost_basis + EURUSD cost_basis
+    # SPY: stock → entry * qty = 500*0.2 = $100
+    # EURUSD: non-USD-base forex → entry * qty = 1.08*10 = $10.80
+    reserve = total_cap * settings.bot.cash_reserve_pct
+    expected_cash = round(total_cap - reserve - (500.0 * 0.2) - (1.08 * 10.0), 6)
     actual_cash = mgr.available_cash()
     assert abs(actual_cash - expected_cash) < 0.0001, (
         f"available_cash mismatch: expected {expected_cash}, got {actual_cash}"
     )
 
-    # At max_positions (2): cannot open any new symbol
-    assert not mgr.can_open_position("QQQ"), (
-        "can_open_position should be False when at max_positions"
-    )
-
-    # Already-held symbol also blocked
+    # Already-held symbol blocked
     assert not mgr.can_open_position("SPY"), (
         "can_open_position should be False for already-held symbol"
     )
@@ -775,17 +802,25 @@ def test_portfolio_state() -> None:
     assert mgr.get_position("SPY") is None, "SPY should be removed after close"
     assert mgr.position_count() == 1
 
-    # After closing SPY: available_cash should increase by cost_basis of SPY ($100)
-    expected_cash_after = round(500.0 - 150.0 - (1.08 * 10.0), 6)
+    # After closing SPY: available_cash = total_cap + realized_pnl - remaining_deployed
+    spy_pnl = (510.0 - 500.0) * 0.2  # $2 realized
+    expected_cash_after = round(total_cap - reserve + spy_pnl - (1.08 * 10.0), 6)
     actual_cash_after = mgr.available_cash()
     assert abs(actual_cash_after - expected_cash_after) < 0.0001, (
         f"available_cash after close mismatch: expected {expected_cash_after}, got {actual_cash_after}"
     )
 
-    # Now we can open a new position again
+    # Can open new position (slot freed)
     assert mgr.can_open_position("QQQ"), (
         "can_open_position should be True after closing one position"
     )
+
+    # Force max_positions to test the cap
+    mgr._max_positions = 1
+    assert not mgr.can_open_position("QQQ"), (
+        "can_open_position should be False when at max_positions"
+    )
+    mgr._max_positions = settings.bot.max_positions  # restore
 
     # snapshot() returns correct structure
     snap = mgr.snapshot()

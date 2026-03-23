@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#1e3224"/>
+      <stop offset="100%" stop-color="#0a1209"/>
+    </radialGradient>
+    <radialGradient id="seal" cx="50%" cy="45%" r="55%">
+      <stop offset="0%" stop-color="#1c2e20"/>
+      <stop offset="100%" stop-color="#0f1a12"/>
+    </radialGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="0.4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="32" height="32" rx="5" fill="url(#bg)"/>
+
+  <!-- Outer ring -->
+  <circle cx="16" cy="16" r="14.5" fill="none" stroke="#c8a96e" stroke-width="0.5" opacity="0.7"/>
+
+  <!-- Inner ring -->
+  <circle cx="16" cy="16" r="12.5" fill="none" stroke="#c8a96e" stroke-width="0.25" opacity="0.35"/>
+
+  <!-- Wax seal body -->
+  <circle cx="16" cy="16" r="11.5" fill="url(#seal)"/>
+
+  <!-- Outer decorative ring -->
+  <circle cx="16" cy="16" r="10.8" fill="none" stroke="#c8a96e" stroke-width="0.4" opacity="0.5"/>
+
+  <!-- Small diamond notches at cardinal points -->
+  <g fill="#c8a96e" opacity="0.6">
+    <rect x="15.55" y="4.8"  width="0.9" height="0.9" rx="0.15" transform="rotate(45 16 5.25)"/>
+    <rect x="15.55" y="26.3" width="0.9" height="0.9" rx="0.15" transform="rotate(45 16 26.75)"/>
+    <rect x="4.8"   y="15.55" width="0.9" height="0.9" rx="0.15" transform="rotate(45 5.25 16)"/>
+    <rect x="26.3"  y="15.55" width="0.9" height="0.9" rx="0.15" transform="rotate(45 26.75 16)"/>
+  </g>
+
+  <!-- Serif T monogram -->
+  <g filter="url(#glow)">
+    <!-- Crossbar -->
+    <path d="M9.5 11.2 L22.5 11.2" stroke="#d4b87a" stroke-width="1.1" stroke-linecap="butt"/>
+    <!-- Left crossbar serif -->
+    <path d="M9.5 10.75 L9.5 11.65" stroke="#d4b87a" stroke-width="0.7" stroke-linecap="round"/>
+    <!-- Right crossbar serif -->
+    <path d="M22.5 10.75 L22.5 11.65" stroke="#d4b87a" stroke-width="0.7" stroke-linecap="round"/>
+    <!-- Vertical stem -->
+    <path d="M16 11.2 L16 21.5" stroke="#d4b87a" stroke-width="1.0" stroke-linecap="butt"/>
+    <!-- Bottom serif bar -->
+    <path d="M14.4 21.5 L17.6 21.5" stroke="#d4b87a" stroke-width="0.7" stroke-linecap="round"/>
+    <!-- Bottom serif foot ticks -->
+    <path d="M14.4 21.0 L14.4 22.0" stroke="#d4b87a" stroke-width="0.45" stroke-linecap="round"/>
+    <path d="M17.6 21.0 L17.6 22.0" stroke="#d4b87a" stroke-width="0.45" stroke-linecap="round"/>
+  </g>
+
+  <!-- Ornamental dots flanking stem -->
+  <circle cx="11.2" cy="16.3" r="0.55" fill="#c8a96e" opacity="0.55"/>
+  <circle cx="20.8" cy="16.3" r="0.55" fill="#c8a96e" opacity="0.55"/>
+
+  <!-- Bottom fleur ornament -->
+  <g fill="#c8a96e" opacity="0.45">
+    <circle cx="16"   cy="24.6" r="0.55"/>
+    <circle cx="14.5" cy="24.1" r="0.38"/>
+    <circle cx="17.5" cy="24.1" r="0.38"/>
+  </g>
+</svg>

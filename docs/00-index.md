@@ -1,6 +1,6 @@
-# Trade Bot Documentation
+# Trade Signet Documentation
 
-Complete reference for the automated trading system.
+Complete reference for the Trade Signet automated trading platform.
 
 ---
 
@@ -40,7 +40,7 @@ python validate.py --portfolio --walkforward
 
 ### View dashboard
 ```bash
-python -m uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 &
+./manage.sh start dashboard
 # Open http://localhost:8050
 ```
 

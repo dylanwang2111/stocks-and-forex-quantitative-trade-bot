@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TradeBot</title>
+  <title>Trade Signet</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=13" />
+  <link rel="stylesheet" href="/static/style.css?v=16" />
   <style>
     /* Table horizontal scroll — inline to bypass CSS caching */
     .ov-bottom-grid > * { min-width: 0 !important; }
@@ -19,7 +20,7 @@
   <script>
     /* Prevent flash of wrong theme — apply dark class before first paint */
     (function() {
-      if (localStorage.getItem('tradebot-theme') === 'dark')
+      if (localStorage.getItem('trade-signet-theme') === 'dark')
         document.documentElement.classList.add('dark');
     })();
   </script>
@@ -31,12 +32,42 @@
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 <header id="topnav">
   <div class="topnav-brand">
-    <svg class="brand-mark" width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <path d="M10 2L18 7V13L10 18L2 13V7L10 2Z" stroke="currentColor" stroke-width="1.5" fill="none"/>
-      <path d="M10 6L14 8.5V13L10 15.5L6 13V8.5L10 6Z" fill="currentColor" opacity="0.15"/>
-      <circle cx="10" cy="10" r="1.5" fill="currentColor"/>
+    <svg class="brand-mark" width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="bm-bg" cx="50%" cy="40%" r="60%">
+          <stop offset="0%" stop-color="#1e3224"/>
+          <stop offset="100%" stop-color="#0a1209"/>
+        </radialGradient>
+        <radialGradient id="bm-seal" cx="50%" cy="45%" r="55%">
+          <stop offset="0%" stop-color="#1c2e20"/>
+          <stop offset="100%" stop-color="#0f1a12"/>
+        </radialGradient>
+      </defs>
+      <rect width="32" height="32" rx="5" fill="url(#bm-bg)"/>
+      <circle cx="16" cy="16" r="14.5" fill="none" stroke="#c8a96e" stroke-width="0.5" opacity="0.7"/>
+      <circle cx="16" cy="16" r="12.5" fill="none" stroke="#c8a96e" stroke-width="0.25" opacity="0.35"/>
+      <circle cx="16" cy="16" r="11.5" fill="url(#bm-seal)"/>
+      <circle cx="16" cy="16" r="10.8" fill="none" stroke="#c8a96e" stroke-width="0.4" opacity="0.5"/>
+      <g fill="#c8a96e" opacity="0.6">
+        <rect x="15.55" y="4.8"  width="0.9" height="0.9" rx="0.15" transform="rotate(45 16 5.25)"/>
+        <rect x="15.55" y="26.3" width="0.9" height="0.9" rx="0.15" transform="rotate(45 16 26.75)"/>
+        <rect x="4.8"   y="15.55" width="0.9" height="0.9" rx="0.15" transform="rotate(45 5.25 16)"/>
+        <rect x="26.3"  y="15.55" width="0.9" height="0.9" rx="0.15" transform="rotate(45 26.75 16)"/>
+      </g>
+      <path d="M9.5 11.2 L22.5 11.2" stroke="#d4b87a" stroke-width="1.1" stroke-linecap="butt"/>
+      <path d="M9.5 10.75 L9.5 11.65" stroke="#d4b87a" stroke-width="0.7" stroke-linecap="round"/>
+      <path d="M22.5 10.75 L22.5 11.65" stroke="#d4b87a" stroke-width="0.7" stroke-linecap="round"/>
+      <path d="M16 11.2 L16 21.5" stroke="#d4b87a" stroke-width="1.0" stroke-linecap="butt"/>
+      <path d="M14.4 21.5 L17.6 21.5" stroke="#d4b87a" stroke-width="0.7" stroke-linecap="round"/>
+      <path d="M14.4 21.0 L14.4 22.0" stroke="#d4b87a" stroke-width="0.45" stroke-linecap="round"/>
+      <path d="M17.6 21.0 L17.6 22.0" stroke="#d4b87a" stroke-width="0.45" stroke-linecap="round"/>
+      <circle cx="11.2" cy="16.3" r="0.55" fill="#c8a96e" opacity="0.55"/>
+      <circle cx="20.8" cy="16.3" r="0.55" fill="#c8a96e" opacity="0.55"/>
+      <circle cx="16"   cy="24.6" r="0.55" fill="#c8a96e" opacity="0.45"/>
+      <circle cx="14.5" cy="24.1" r="0.38" fill="#c8a96e" opacity="0.45"/>
+      <circle cx="17.5" cy="24.1" r="0.38" fill="#c8a96e" opacity="0.45"/>
     </svg>
-    <span class="brand-name">TradeBot</span>
+    <span class="brand-name">Trade Signet</span>
   </div>
 
   <nav class="topnav-links" id="sidebar-nav">
@@ -156,7 +187,14 @@
         <div class="table-wrap" id="ov-pos-mini">
           <table class="dt" id="ov-open-table">
             <thead><tr>
-              <th>Symbol</th><th>Dir</th><th>Entry</th><th>Current</th><th>To Stop%</th><th>To TP%</th><th>Unreal P&amp;L</th><th>Phase</th>
+              <th data-tip="Instrument ticker (stock, forex pair, or crypto)">Symbol</th>
+              <th data-tip="Trade direction — Long profits when price rises, Short profits when price falls">Dir</th>
+              <th data-tip="Fill price when the position was opened">Entry</th>
+              <th data-tip="Last 1-hour close price fetched live (may be up to 59 min stale)">Current</th>
+              <th data-tip="Distance from current price to stop-loss as %. Positive = stop not yet hit">To Stop%</th>
+              <th data-tip="Distance from current price to target as %. Positive = target not yet reached">To TP%</th>
+              <th data-tip="Mark-to-market profit/loss in USD. For USD-base forex (USDJPY, USDCHF, USDCAD): (price diff / current price) × qty to convert quote currency to USD">Unreal P&amp;L</th>
+              <th data-tip="Phase 1 = within original stop/TP range. Phase 2-trailing = past TP, trailing stop active">Phase</th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -165,22 +203,22 @@
         <div class="table-wrap ov-pos-full-wrap" id="ov-pos-full">
           <table class="dt" id="ov-open-table-full">
             <thead><tr>
-              <th>Symbol</th>
-              <th>Dir</th>
-              <th>Phase</th>
-              <th>Entry</th>
-              <th>Current</th>
-              <th>Stop</th>
-              <th>Target</th>
-              <th>To Stop%</th>
-              <th>To TP%</th>
-              <th>TP Progress</th>
-              <th>Unreal P&amp;L</th>
-              <th>Qty</th>
-              <th>Held</th>
-              <th>Left</th>
-              <th>Tier</th>
-              <th>Conf</th>
+              <th data-tip="Instrument ticker (stock, forex pair, or crypto)">Symbol</th>
+              <th data-tip="Trade direction — Long profits when price rises, Short profits when price falls">Dir</th>
+              <th data-tip="Phase 1 = within original stop/TP range. Phase 2-trailing = past original TP, trailing stop now active. Phase 2-past TP = price has exceeded target">Phase</th>
+              <th data-tip="Fill price when the position was opened">Entry</th>
+              <th data-tip="Last 1-hour close price fetched live (may be up to 59 min stale)">Current</th>
+              <th data-tip="Current stop-loss price. If hit, position closes. Trails upward in Phase 2 for longs">Stop</th>
+              <th data-tip="Original take-profit target. Once reached, trailing stop activates (Phase 2)">Target</th>
+              <th data-tip="Distance from current price to stop-loss as %. Positive = stop not yet hit, negative = stop already breached">To Stop%</th>
+              <th data-tip="Distance from current price to original target as %. Positive = target not yet reached, negative = price is past target">To TP%</th>
+              <th data-tip="How far price has moved from entry toward the target (%). 100% = exactly at target. Over 100% = past target">TP Progress</th>
+              <th data-tip="Mark-to-market profit/loss in USD. Stocks and non-USD-base forex: (current - entry) x qty. USD-base pairs (USDJPY, USDCHF, USDCAD): (current - entry) / current x qty — converts quote currency (JPY/CHF/CAD) to USD">Unreal P&amp;L</th>
+              <th data-tip="Units held. Stocks: fractional shares. Non-USD-base forex (EURUSD, GBPUSD): OANDA base-currency units. USD-base forex (USDJPY, USDCHF, USDCAD): USD units directly — qty equals position size in USD since 1 OANDA unit = 1 USD of base">Qty</th>
+              <th data-tip="Trading days held. Stocks and forex: weekdays only (weekends excluded). Crypto: calendar days (24/7 market)">Held</th>
+              <th data-tip="Days remaining before forced time-exit (SWING_HOLDING_DAYS minus Held). Position is closed when this reaches 0">Left</th>
+              <th data-tip="Confidence tier at entry — SMALL (55-59), MEDIUM (60-69), LARGE (70-79), FULL (80+). Controls position size fraction">Tier</th>
+              <th data-tip="Confidence score (0-100) at the time of entry. Higher score = stronger signal agreement across all categories">Conf</th>
             </tr></thead>
             <tbody></tbody>
           </table>

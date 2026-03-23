@@ -83,10 +83,13 @@ yfinance uses non-standard tickers for forex. The `_SYMBOL_MAP` translates inter
 |----------|----------|
 | `EURUSD` | `EURUSD=X` |
 | `GBPUSD` | `GBPUSD=X` |
+| `AUDUSD` | `AUDUSD=X` |
+| `NZDUSD` | `NZDUSD=X` |
 | `USDJPY` | `JPY=X` |
 | `USDCAD` | `CAD=X` |
 | `USDCHF` | `CHF=X` |
-| `AUDUSD` | `AUDUSD=X` |
+
+> **USD-base pairs** (USDJPY, USDCAD, USDCHF): in OANDA, 1 unit = 1 USD of base currency. Quantity sizing does NOT divide by price — `quantity = position_size_usd` directly. P&L is in the quote currency (JPY, CAD, CHF) and must be divided by the current price to convert to USD.
 
 Stock and ETF symbols map 1:1 (`NVDA` → `NVDA`).
 

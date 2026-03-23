@@ -324,8 +324,15 @@ class PreScreenAgent:
             if adx_col:
                 adx_val = float(adx_df[adx_col[0]].iloc[-1])
 
-        # ── Soft gate: EMA9 > EMA21 ────────────────────────────────────────────
-        if e9 is None or e21 is None or not (e9 > e21):
+        # ── Direction gate (soft — EMA9 vs EMA21 only for daily prescreen) ───────
+        # Both long and short candidates are eligible.
+        if e9 is None or e21 is None:
+            return None
+
+        is_long = e9 > e21
+        is_bear = e9 < e21
+
+        if not (is_long or is_bear):
             return None
 
         # ── 1. Technical score (0–6) ───────────────────────────────────────────
@@ -338,11 +345,16 @@ class PreScreenAgent:
 
         if len(close) >= 20:
             ret_20d = float(close.iloc[-1] / close.iloc[-20] - 1.0)
-            if ret_20d > 0.02:
+            if is_long and ret_20d > 0.02:
+                tech_score += 1.0
+            elif is_bear and ret_20d < -0.02:
                 tech_score += 1.0
 
-        if rsi_val is not None and 45 <= rsi_val <= 70:
-            tech_score += 1.0
+        if rsi_val is not None:
+            if is_long and 45 <= rsi_val <= 70:
+                tech_score += 1.0
+            elif is_bear and 30 <= rsi_val <= 55:
+                tech_score += 1.0
 
         if instrument.asset_type == "stock" and not volume.empty:
             avg_vol = float(volume.rolling(20).mean().iloc[-1])
@@ -356,9 +368,9 @@ class PreScreenAgent:
                 if 0.003 <= atr_pct <= 0.06:
                     tech_score += 1.0
 
-        # ── 2. Fundamental score (0–4, stocks only) ───────────────────────────
+        # ── 2. Fundamental score (0–4, stocks only, long candidates only) ──────
         fund_score = 0.0
-        if instrument.asset_type == "stock":
+        if instrument.asset_type == "stock" and is_long:
             fund = self._fetch_fundamentals(instrument.symbol)
 
             pe = fund.get("pe")
@@ -379,29 +391,49 @@ class PreScreenAgent:
             if eps_g is not None and eps_g >= _EPS_GROWTH:
                 fund_score += 0.5
 
-        # ── 3. Macro context bonus (0–3, sector-specific) ─────────────────────
+        # ── 3. Macro context bonus (0–3, sector-specific, direction-aware) ─────
         macro_score = 0.0
         sector = _SECTOR.get(instrument.symbol, "other")
 
-        if sector == "gold":
-            if macro.gold_uptrend:
-                macro_score += 1.5
-            if macro.vix >= _VIX_FEAR:
-                macro_score += 1.0
-            if macro.vix >= _VIX_STRESS:
-                macro_score += 0.5
-        elif sector == "energy":
-            if macro.oil_uptrend:
-                macro_score += 1.5
-            if macro.vix >= _VIX_FEAR:
-                macro_score += 0.5
-        elif sector == "tech":
-            if macro.vix < _VIX_FEAR:
-                macro_score += 1.0
-            if macro.vix >= _VIX_STRESS:
-                macro_score -= 1.0
-        elif sector == "broad":
-            if macro.gold_uptrend or macro.oil_uptrend:
-                macro_score += 0.5
+        if is_long:
+            if sector == "gold":
+                if macro.gold_uptrend:
+                    macro_score += 1.5
+                if macro.vix >= _VIX_FEAR:
+                    macro_score += 1.0
+                if macro.vix >= _VIX_STRESS:
+                    macro_score += 0.5
+            elif sector == "energy":
+                if macro.oil_uptrend:
+                    macro_score += 1.5
+                if macro.vix >= _VIX_FEAR:
+                    macro_score += 0.5
+            elif sector == "tech":
+                if macro.vix < _VIX_FEAR:
+                    macro_score += 1.0
+                if macro.vix >= _VIX_STRESS:
+                    macro_score -= 1.0
+            elif sector == "broad":
+                if macro.gold_uptrend or macro.oil_uptrend:
+                    macro_score += 0.5
+        else:  # bear
+            if sector == "gold":
+                if not macro.gold_uptrend:
+                    macro_score += 1.5
+                if macro.vix < _VIX_FEAR:
+                    macro_score += 0.5
+            elif sector == "energy":
+                if not macro.oil_uptrend:
+                    macro_score += 1.5
+                if macro.vix < _VIX_FEAR:
+                    macro_score += 0.5
+            elif sector == "tech":
+                if macro.vix >= _VIX_FEAR:
+                    macro_score += 1.0
+                if macro.vix >= _VIX_STRESS:
+                    macro_score += 0.5
+            elif sector == "broad":
+                if not macro.gold_uptrend and not macro.oil_uptrend:
+                    macro_score += 0.5
 
         return tech_score + fund_score + macro_score

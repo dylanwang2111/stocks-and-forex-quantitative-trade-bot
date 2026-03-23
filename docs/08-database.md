@@ -11,7 +11,7 @@ The bot uses SQLAlchemy ORM with SQLite (default) or PostgreSQL (production). Th
 DATABASE_URL=sqlite:///trade_bot.db
 
 # PostgreSQL (production — multi-instance or hosted VPS)
-DATABASE_URL=postgresql://user:pass@localhost/tradebot
+DATABASE_URL=postgresql://user:pass@localhost/trade_signet
 ```
 
 ---
