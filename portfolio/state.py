@@ -103,6 +103,30 @@ class Position:
 
 
 # ---------------------------------------------------------------------------
+def _calc_pnl_usd(symbol: str, direction: str, entry: float, exit_price: float, qty: float) -> float:
+    """Compute realised P&L in USD, applying quote-currency conversion for USD-base forex pairs.
+
+    USDJPY/USDCHF/USDCAD: price is quote-currency per 1 USD.  Raw P&L is in that
+    quote currency, so divide by exit_price to convert back to USD.
+    All other instruments: raw P&L is already in USD.
+    """
+    try:
+        from portfolio.watchlist import get_instrument
+        instr = get_instrument(symbol)
+        is_usd_base = instr.asset_type == "forex" and symbol.upper().startswith("USD")
+    except Exception:
+        is_usd_base = False
+
+    if direction == "long":
+        raw = (exit_price - entry) * qty
+    else:
+        raw = (entry - exit_price) * qty
+
+    if is_usd_base and exit_price:
+        return raw / exit_price
+    return raw
+
+
 # PortfolioStateManager
 # ---------------------------------------------------------------------------
 
@@ -248,10 +272,8 @@ class PortfolioStateManager:
                 raise KeyError(f"close_position: no open position found for '{symbol}'")
 
         # Compute P&L outside the lock (pure arithmetic)
-        if position.direction == "long":
-            pnl_usd = (exit_price - position.entry_price) * position.quantity
-        else:  # short
-            pnl_usd = (position.entry_price - exit_price) * position.quantity
+        pnl_usd = _calc_pnl_usd(position.symbol, position.direction,
+                                 position.entry_price, exit_price, position.quantity)
 
         cost_basis = position.cost_basis()
         pnl_pct = pnl_usd / cost_basis if cost_basis != 0.0 else 0.0
@@ -316,10 +338,8 @@ class PortfolioStateManager:
             remain_qty = position.quantity - close_qty
 
         # P&L for the closed slice
-        if position.direction == "long":
-            pnl_usd = (exit_price - position.entry_price) * close_qty
-        else:
-            pnl_usd = (position.entry_price - exit_price) * close_qty
+        pnl_usd = _calc_pnl_usd(position.symbol, position.direction,
+                                 position.entry_price, exit_price, close_qty)
 
         # Persist remaining quantity to Trade row (original quantity is preserved)
         session = get_session(self._database_url)
