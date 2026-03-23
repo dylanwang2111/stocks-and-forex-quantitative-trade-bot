@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, time as dt_time
 from typing import Optional
 
 try:
@@ -47,6 +47,63 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # CircuitBreaker
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Stale-exit helpers
+# ---------------------------------------------------------------------------
+
+# NYSE/NASDAQ regular session in UTC (ET + 4 or 5 depending on DST).
+# We use a fixed 13:30–20:00 UTC window (= 9:30–16:00 ET year-round).
+# Slight inaccuracy around DST transitions is acceptable for this heuristic.
+_MARKET_OPEN_UTC  = dt_time(13, 30)
+_MARKET_CLOSE_UTC = dt_time(20, 0)
+
+# Stale-exit min-profit threshold by asset type.
+# Price must have moved at least this far in our favour after the hold period;
+# otherwise the trade is considered dead and closed.
+_STALE_MIN_PNL_PCT: dict[str, float] = {
+    "stock":  0.005,   # 0.5% — stocks have larger intraday noise
+    "forex":  0.003,   # 0.3% — forex moves are smaller
+    "crypto": 0.003,   # 0.3%
+}
+
+
+def _stock_market_hours_held(entry_time: datetime, now: datetime) -> float:
+    """Return the number of stock market hours elapsed since *entry_time*.
+
+    Both arguments should be timezone-aware UTC datetimes (or naive UTC).
+    Counts only Mon–Fri 13:30–20:00 UTC (NYSE 9:30–16:00 ET).
+    """
+    # Normalise to naive UTC for arithmetic simplicity
+    def _naive_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    start = _naive_utc(entry_time)
+    end   = _naive_utc(now)
+    if end <= start:
+        return 0.0
+
+    total_seconds = 0.0
+    cursor = start
+    while cursor < end:
+        # Skip weekends
+        if cursor.weekday() >= 5:
+            cursor += timedelta(days=1)
+            cursor = cursor.replace(hour=0, minute=0, second=0, microsecond=0)
+            continue
+        day_open  = cursor.replace(hour=_MARKET_OPEN_UTC.hour,  minute=_MARKET_OPEN_UTC.minute,  second=0, microsecond=0)
+        day_close = cursor.replace(hour=_MARKET_CLOSE_UTC.hour, minute=_MARKET_CLOSE_UTC.minute, second=0, microsecond=0)
+        seg_start = max(cursor, day_open)
+        seg_end   = min(end, day_close)
+        if seg_end > seg_start:
+            total_seconds += (seg_end - seg_start).total_seconds()
+        # Advance to next calendar day
+        cursor = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return total_seconds / 3600.0
+
 
 @dataclass
 class CircuitBreakerState:
@@ -826,22 +883,36 @@ class Orchestrator:
                         logger.error("Exit failed for %s: %s", symbol, result.error)
                     continue
 
-            # ── Stale-trade exit (48 h, price hasn't moved in signal direction) ──
+            # ── Stale-trade exit ────────────────────────────────────────────
             # Free up capital locked in flat positions that never developed.
-            # Fires if held ≥ 48 hours AND price is still within 0.3% of entry
-            # in our favour — the trade simply isn't working.
+            # Stocks: count only market hours (Mon-Fri 13:30-20:00 UTC) — threshold 6h
+            # Forex/crypto: wall-clock hours — threshold 48h
+            # In both cases, price must have moved < asset-type threshold in our favour.
             if current_price is not None:
-                held_hours = (now_utc - position.entry_time).total_seconds() / 3600
-                if held_hours >= 48:
+                try:
+                    from portfolio.watchlist import get_instrument as _gi_stale
+                    _stale_asset = _gi_stale(symbol).asset_type
+                except Exception:
+                    _stale_asset = "stock"
+
+                if _stale_asset == "stock":
+                    held_hours   = _stock_market_hours_held(position.entry_time, now_utc)
+                    stale_thresh = 6.0   # 6 market hours ≈ 1 full trading day
+                else:
+                    held_hours   = (now_utc - position.entry_time).total_seconds() / 3600
+                    stale_thresh = 48.0
+
+                if held_hours >= stale_thresh:
                     pnl_pct = (
                         (current_price - position.entry_price) / position.entry_price
                         if position.direction == "long"
                         else (position.entry_price - current_price) / position.entry_price
                     )
-                    if pnl_pct < 0.003:  # hasn't moved 0.3% in our direction
+                    min_pct = _STALE_MIN_PNL_PCT.get(_stale_asset, 0.003)
+                    if pnl_pct < min_pct:
                         logger.info(
-                            "Exit: %s stale after %.0fh — pnl_pct=%.3f%% < 0.3%%, closing.",
-                            symbol, held_hours, pnl_pct * 100,
+                            "Exit: %s stale after %.1fh (%s) — pnl_pct=%.3f%% < %.1f%%, closing.",
+                            symbol, held_hours, _stale_asset, pnl_pct * 100, min_pct * 100,
                         )
                         result = self._exec_agent.close_position(
                             position=position,
