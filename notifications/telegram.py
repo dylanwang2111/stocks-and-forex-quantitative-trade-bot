@@ -103,10 +103,8 @@ class TelegramNotifier:
         quantity: float,
         reason: str,
     ) -> None:
-        if direction == "long":
-            pnl = (exit_price - entry_price) * quantity
-        else:
-            pnl = (entry_price - exit_price) * quantity
+        from portfolio.state import _calc_pnl_usd
+        pnl = _calc_pnl_usd(symbol, direction, entry_price, exit_price, quantity)
         pnl_pct = (exit_price - entry_price) / entry_price * 100
         if direction == "short":
             pnl_pct = -pnl_pct
