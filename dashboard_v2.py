@@ -473,6 +473,19 @@ def api_overview():
             "synced_at": sync.get("synced_at"),
         }
 
+        # In live trading mode, broker NAV is authoritative (real money balance).
+        # In paper mode, the practice account has an artificial default balance
+        # (e.g. OANDA practice = $100,000), so we keep the configured capital.
+        if settings.bot.trading_mode == "live":
+            if oanda_live.get("status") == "live":
+                oanda_pool    = oanda_live["nav"]
+                oanda_cap     = oanda_live["balance"]
+                oanda_realized = oanda_live["realized_pnl"]
+            if ibkr_live.get("status") == "live":
+                ibkr_pool    = ibkr_live["nav"]
+                ibkr_cap     = ibkr_live["balance"]
+                ibkr_realized = ibkr_live["realized_pnl"]
+
         # Recompute totals with broker-sourced values
         realized = ibkr_realized + oanda_realized
         ibkr_res  = ibkr_cap  * reserve_pct
