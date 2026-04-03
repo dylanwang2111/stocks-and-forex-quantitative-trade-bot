@@ -508,6 +508,7 @@ async function renderBrokerSync(force = false) {
       }
     } else {
       valEl.textContent = '—';
+      if (info?.error) valEl.title = info.error;
     }
   }
 

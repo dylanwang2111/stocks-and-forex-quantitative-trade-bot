@@ -189,7 +189,7 @@ def _fetch_ibkr_live() -> dict | None:
             "status":         "live",
         }
     except Exception as exc:
-        logger.debug("IBKR account sync failed: %s", exc)
+        logger.warning("IBKR account sync failed: %s", exc)
         return {"status": "offline", "error": str(exc)}
 
 
