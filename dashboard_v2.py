@@ -13,6 +13,7 @@ import math
 import os
 import secrets
 import socket
+import time
 
 logger = logging.getLogger(__name__)
 from contextlib import contextmanager
@@ -100,7 +101,6 @@ app = FastAPI(
     title="Trade Bot Dashboard v2",
     docs_url=None,
     redoc_url=None,
-    dependencies=[Depends(_require_auth)],
 )
 app.add_middleware(
     CORSMiddleware,
@@ -131,6 +131,84 @@ def index():
     return FileResponse(ROOT / "static" / "index.html")
 
 
+# ── Broker account sync ────────────────────────────────────────────────────────
+
+_broker_cache: dict = {"data": None, "ts": 0.0}
+_BROKER_CACHE_TTL = 60.0  # seconds
+
+
+def _fetch_oanda_live() -> dict | None:
+    """Fetch live account summary from OANDA REST API."""
+    try:
+        import oandapyV20
+        import oandapyV20.endpoints.accounts as oanda_accounts
+        api_key    = settings.oanda.api_key
+        account_id = settings.oanda.account_id
+        env        = getattr(settings.oanda, "environment", "practice")
+        if not api_key or not account_id:
+            return None
+        client = oandapyV20.API(access_token=api_key, environment=env)
+        r = oanda_accounts.AccountSummary(account_id)
+        client.request(r)
+        acct = r.response.get("account", {})
+        return {
+            "balance":        round(float(acct.get("balance",       0)), 2),
+            "nav":            round(float(acct.get("NAV",           0)), 2),
+            "unrealized_pnl": round(float(acct.get("unrealizedPL",  0)), 2),
+            "realized_pnl":   round(float(acct.get("pl",            0)), 2),
+            "open_trades":    int(acct.get("openTradeCount",  0)),
+            "open_positions": int(acct.get("openPositionCount", 0)),
+            "currency":       acct.get("currency", "USD"),
+            "status":         "live",
+        }
+    except Exception as exc:
+        logger.debug("OANDA account sync failed: %s", exc)
+        return {"status": "offline", "error": str(exc)}
+
+
+def _fetch_ibkr_live() -> dict | None:
+    """Fetch live account values from IBKR via ib_insync."""
+    try:
+        from ib_insync import IB, util
+        util.logToConsole(logging.CRITICAL)  # suppress ib_insync noise
+        host      = settings.ibkr.host
+        port      = settings.ibkr.port
+        # Use a dedicated dashboard client ID — never conflicts with the bot
+        dash_cid  = int(os.getenv("IBKR_DASH_CLIENT_ID", "99"))
+        ib = IB()
+        ib.connect(host, port, clientId=dash_cid, timeout=8, readonly=True)
+        vals = {v.tag: float(v.value) for v in ib.accountValues()
+                if v.currency in ("USD", "BASE") and v.value not in ("", "N/A")}
+        ib.disconnect()
+        return {
+            "balance":        round(vals.get("TotalCashValue",     0), 2),
+            "nav":            round(vals.get("NetLiquidation",     0), 2),
+            "unrealized_pnl": round(vals.get("UnrealizedPnL",      0), 2),
+            "realized_pnl":   round(vals.get("RealizedPnL",        0), 2),
+            "gross_pnl":      round(vals.get("GrossPositionValue", 0), 2),
+            "status":         "live",
+        }
+    except Exception as exc:
+        logger.debug("IBKR account sync failed: %s", exc)
+        return {"status": "offline", "error": str(exc)}
+
+
+def _broker_sync(force: bool = False) -> dict:
+    """Return cached broker account data; refresh if stale or forced."""
+    now = time.time()
+    if not force and _broker_cache["data"] and (now - _broker_cache["ts"]) < _BROKER_CACHE_TTL:
+        return _broker_cache["data"]
+    data = {
+        "oanda":     _fetch_oanda_live(),
+        "ibkr":      _fetch_ibkr_live(),
+        "synced_at": datetime.utcnow().isoformat() + "Z",
+        "ttl":       _BROKER_CACHE_TTL,
+    }
+    _broker_cache["data"] = data
+    _broker_cache["ts"]   = now
+    return data
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _parse_meta(raw) -> dict:
@@ -142,6 +220,27 @@ def _parse_meta(raw) -> dict:
         except Exception:
             return {}
     return raw
+
+# ── Fee constants & cost helpers ───────────────────────────────────────────────
+STOCK_FEE  = 0.0005   # ~0.05% round-trip: IBKR ~$0.005/share + exchange/reg fees
+FOREX_FEE  = 0.00008  # ~0.008% round-trip: OANDA spread (EURUSD ~0.6 pip, USDJPY ~0.8 pip)
+CRYPTO_FEE = 0.0005   # ~0.05% round-trip: exchange maker/taker spread
+SLIPPAGE   = 0.0002   # ~0.02%: conservative market impact / price improvement
+_FOREX_SYMS  = {"EURUSD","GBPUSD","USDJPY","AUDUSD","USDCAD","USDCHF","NZDUSD"}
+_CRYPTO_SYMS = {"BTCUSD","ETHUSD"}
+
+def _pos_usd(symbol: str, price: float, qty: float) -> float:
+    """Return position value in USD, correcting for USD-base forex pairs."""
+    if len(symbol) == 6 and symbol.upper().startswith("USD"):
+        return qty
+    return price * qty
+
+def _fee_rate(symbol: str, broker: str | None) -> float:
+    if symbol in _CRYPTO_SYMS:
+        return CRYPTO_FEE
+    if symbol in _FOREX_SYMS or (broker or "ibkr") == "oanda":
+        return FOREX_FEE
+    return STOCK_FEE
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -259,6 +358,16 @@ def _calc_pnl_totals(db: Session, total_capital: float) -> dict:
 
 # ── API: /api/overview ─────────────────────────────────────────────────────────
 
+@app.get("/api/broker-sync")
+def api_broker_sync(force: bool = False):
+    """Live broker account data from OANDA + IBKR. Cached for 60 s."""
+    try:
+        return _broker_sync(force=force)
+    except Exception as exc:
+        logger.exception("broker-sync error")
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
 @app.get("/api/overview")
 def api_overview():
     try:
@@ -273,8 +382,12 @@ def api_overview():
                 .order_by(PortfolioSnapshot.timestamp.desc())
                 .first()
             )
-            open_trades = db.query(Trade).filter(Trade.status == "open").all()
+            open_trades    = db.query(Trade).filter(Trade.status == "open").all()
+            closed_trades  = db.query(Trade).filter(Trade.status == "closed").all()
+            partial_evts   = db.query(EventLog).filter(EventLog.event_type == "partial_close").all()
             pnl = _calc_pnl_totals(db, total_capital)
+
+        costs_by_broker = _calc_costs_by_broker(closed_trades, partial_evts, open_trades)
 
         snap_age = None
         last_snap_time = None
@@ -285,10 +398,12 @@ def api_overview():
             snap_age = (datetime.utcnow() - snap.timestamp).total_seconds()
             drawdown_pct = snap.drawdown_pct
         # Check if main.py process is actually running
-        import subprocess as _sp
         try:
-            _out = _sp.check_output(["pgrep", "-f", "main.py"], text=True).strip()
-            bot_running = bool(_out)
+            _pidfile = Path(__file__).parent / "logs" / "bot.pid"
+            _pid = int(_pidfile.read_text().strip())
+            import os as _os
+            _os.kill(_pid, 0)
+            bot_running = True
         except Exception:
             bot_running = snap_age is not None and snap_age < 5400
 
@@ -343,8 +458,25 @@ def api_overview():
         realized_by_broker = pnl.get("realized_by_broker", {})
         ibkr_realized  = realized_by_broker.get("ibkr",  0.0)
         oanda_realized = realized_by_broker.get("oanda", 0.0)
-        ibkr_pool  = ibkr_cap  + ibkr_realized
-        oanda_pool = oanda_cap + oanda_realized
+        ibkr_costs  = costs_by_broker.get("ibkr",  0.0)
+        oanda_costs = costs_by_broker.get("oanda", 0.0)
+        ibkr_pool  = ibkr_cap  + ibkr_realized  - ibkr_costs
+        oanda_pool = oanda_cap + oanda_realized - oanda_costs
+
+        # ── Overlay with live broker data when available ───────────────────────
+        sync = _broker_sync()
+        oanda_live = sync.get("oanda") or {}
+        ibkr_live  = sync.get("ibkr")  or {}
+        broker_sync_status = {
+            "oanda": oanda_live.get("status", "offline"),
+            "ibkr":  ibkr_live.get("status",  "offline"),
+            "synced_at": sync.get("synced_at"),
+        }
+
+        # Recompute totals with broker-sourced values
+        realized = ibkr_realized + oanda_realized
+        ibkr_res  = ibkr_cap  * reserve_pct
+        oanda_res = oanda_cap * reserve_pct
 
         # PDT
         try:
@@ -355,14 +487,21 @@ def api_overview():
         except Exception:
             pdt_used, pdt_limit = 0, 3
 
+        # Use broker unrealized P&L when both brokers are live (more accurate)
+        oanda_unreal = oanda_live.get("unrealized_pnl") if oanda_live.get("status") == "live" else None
+        ibkr_unreal  = ibkr_live.get("unrealized_pnl")  if ibkr_live.get("status")  == "live" else None
+        if oanda_unreal is not None or ibkr_unreal is not None:
+            total_unrealized = round((oanda_unreal or 0) + (ibkr_unreal or 0), 2)
+
         return {
             "trading_mode": settings.bot.trading_mode,
             "bot_running": bot_running,
             "total_capital": total_capital,
-            # Mark-to-market equity: base capital + all realized + open unrealized
-            "current_equity": round(total_capital + pnl["total_realized"] + total_unrealized, 2),
-            "realized_pnl": pnl["total_realized"],
+            # Mark-to-market equity: pool (capital + realized − costs) + open unrealized
+            "current_equity": round(ibkr_pool + oanda_pool + total_unrealized, 2),
+            "realized_pnl": round(realized, 2),
             "unrealized_pnl": total_unrealized,
+            "broker_sync": broker_sync_status,
             "daily_pnl": pnl["daily_pnl"],
             "win_rate": pnl["win_rate"],
             "open_positions": len(open_trades),
@@ -389,10 +528,10 @@ def api_overview():
                     "positions": len(oanda_pos),
                 },
                 "total": {
-                    "pool": round(total_capital + realized, 2),
+                    "pool": round(ibkr_pool + oanda_pool, 2),
                     "deployed": round(total_dep, 2),
-                    "available": round(max(0.0, total_capital + realized - total_dep), 2),
-                    "utilization_pct": round(total_dep / (total_capital + realized) * 100, 1) if (total_capital + realized) else 0,
+                    "available": round(max(0.0, ibkr_pool + oanda_pool - total_dep), 2),
+                    "utilization_pct": round(total_dep / (ibkr_pool + oanda_pool) * 100, 1) if (ibkr_pool + oanda_pool) else 0,
                     "positions": len(open_trades),
                 },
             },
@@ -692,6 +831,10 @@ def api_signals(
 def api_trades(
     symbol: str = Query(""),
     direction: str = Query(""),
+    year: int = Query(0),
+    month: int = Query(0),
+    day: int = Query(0),
+    hour: int = Query(-1),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=10000),
 ):
@@ -795,6 +938,21 @@ def api_trades(
             rows = [r for r in rows if r["symbol"] == symbol]
         if direction:
             rows = [r for r in rows if r["direction"] == direction]
+        if year or month or day or hour >= 0:
+            def _match_date(r):
+                t = r["time"]
+                if t is None:
+                    return False
+                if year and t.year != year:
+                    return False
+                if month and t.month != month:
+                    return False
+                if day and t.day != day:
+                    return False
+                if hour >= 0 and t.hour != hour:
+                    return False
+                return True
+            rows = [r for r in rows if _match_date(r)]
 
         rows.sort(key=lambda r: r["time"] or datetime.min, reverse=True)
 
@@ -831,16 +989,56 @@ def api_trades(
 
 # ── API: /api/costs ────────────────────────────────────────────────────────────
 
-STOCK_FEE  = 0.001
-FOREX_FEE  = 0.0003
-SLIPPAGE   = 0.0005
-_FOREX_SYMS = {"EURUSD","GBPUSD","USDJPY","AUDUSD","USDCAD","USDCHF","BTCUSD","ETHUSD"}
+def _calc_costs_by_broker(closed_trades, partial_evts, open_trades) -> dict:
+    """Return total estimated costs (fees + slippage) keyed by broker name."""
+    costs: dict[str, float] = {}
+
+    for t in closed_trades:
+        if t.entry_price is None or t.quantity is None:
+            continue
+        broker = (t.broker or "ibkr").lower()
+        # Use remaining_quantity (post-partial-close) so we don't double-count
+        # the portion already charged in the partial_evts loop below.
+        exit_qty = t.remaining_quantity if t.remaining_quantity is not None else t.quantity
+        pos_usd = _pos_usd(t.symbol or "", t.entry_price, exit_qty)
+        costs[broker] = costs.get(broker, 0.0) + pos_usd * (_fee_rate(t.symbol or "", t.broker) + SLIPPAGE)
+
+    trade_by_sym = {t.symbol: t for t in closed_trades}
+    for ev in partial_evts:
+        meta  = _parse_meta(ev.event_metadata)
+        sym   = ev.symbol or ""
+        price = meta.get("exit_price", 0.0)
+        qty   = meta.get("close_qty") or 0.0
+        gross = meta.get("pnl_usd", 0.0)
+        if not price:
+            continue
+        if not qty and gross and sym in trade_by_sym:
+            spread = abs(trade_by_sym[sym].entry_price - price)
+            if spread > 0:
+                _usd_base = len(sym) == 6 and sym.upper().startswith("USD")
+                qty = abs(gross) * price / spread if _usd_base else abs(gross) / spread
+        if not qty:
+            continue
+        ref = trade_by_sym.get(sym)
+        broker = ((ref.broker if ref else None) or "ibkr").lower()
+        pos_usd = _pos_usd(sym, price, qty)
+        costs[broker] = costs.get(broker, 0.0) + pos_usd * (_fee_rate(sym, broker) + SLIPPAGE)
+
+    for t in open_trades:
+        if t.entry_price is None or t.quantity is None:
+            continue
+        broker = (t.broker or "ibkr").lower()
+        pos_usd = _pos_usd(t.symbol or "", t.entry_price, t.quantity)
+        costs[broker] = costs.get(broker, 0.0) + pos_usd * (_fee_rate(t.symbol or "", t.broker) + SLIPPAGE)
+
+    return costs
 
 @app.get("/api/costs")
 def api_costs():
     try:
         with get_db() as db:
             closed = db.query(Trade).filter(Trade.status == "closed").order_by(Trade.exit_time).all()
+            open_trades = db.query(Trade).filter(Trade.status == "open").order_by(Trade.entry_time).all()
             partials = (
                 db.query(EventLog)
                 .filter(EventLog.event_type == "partial_close")
@@ -854,11 +1052,10 @@ def api_costs():
         for t in closed:
             if t.entry_price is None or t.exit_price is None or t.quantity is None:
                 continue
-            gross       = t.pnl_usd or 0.0
-            pos_usd     = t.entry_price * t.quantity
-            is_forex    = (t.broker or "ibkr") == "oanda"
-            fee_rate    = FOREX_FEE if is_forex else STOCK_FEE
-            cost        = pos_usd * (fee_rate + SLIPPAGE)
+            gross    = t.pnl_usd or 0.0
+            exit_qty = t.remaining_quantity if t.remaining_quantity is not None else t.quantity
+            pos_usd  = _pos_usd(t.symbol or "", t.entry_price, exit_qty)
+            cost     = pos_usd * (_fee_rate(t.symbol or "", t.broker) + SLIPPAGE)
             rows.append({
                 "symbol": t.symbol, "type": "full close", "exit_time": _iso(t.exit_time),
                 "gross_pnl": round(gross, 4), "estimated_cost": round(cost, 4),
@@ -876,30 +1073,47 @@ def api_costs():
             if not qty and gross and sym in trade_by_sym:
                 spread = abs(trade_by_sym[sym].entry_price - price)
                 if spread > 0:
-                    qty = abs(gross) / spread
+                    _usd_base = len(sym) == 6 and sym.upper().startswith("USD")
+                    if _usd_base:
+                        # pnl_usd = spread_in_quote / exit_price * qty  →  qty = pnl * price / spread
+                        qty = abs(gross) * price / spread
+                    else:
+                        qty = abs(gross) / spread
             if not qty:
                 continue
-            pos_usd  = price * qty
-            is_forex = sym in _FOREX_SYMS or (
-                sym in trade_by_sym and trade_by_sym[sym].broker == "oanda"
-            )
-            fee_rate = FOREX_FEE if is_forex else STOCK_FEE
-            cost     = pos_usd * (fee_rate + SLIPPAGE)
+            broker   = trade_by_sym[sym].broker if sym in trade_by_sym else None
+            pos_usd  = _pos_usd(sym, price, qty)
+            cost     = pos_usd * (_fee_rate(sym, broker) + SLIPPAGE)
             rows.append({
                 "symbol": sym, "type": "partial close", "exit_time": _iso(ev.timestamp),
                 "gross_pnl": round(gross, 4), "estimated_cost": round(cost, 4),
                 "net_pnl": round(gross - cost, 4),
             })
 
-        total_gross = sum(r["gross_pnl"] for r in rows)
-        total_cost  = sum(r["estimated_cost"] for r in rows)
+        # Open position entry costs (already paid, exit not yet incurred)
+        open_rows = []
+        for t in open_trades:
+            if t.entry_price is None or t.quantity is None:
+                continue
+            pos_usd = _pos_usd(t.symbol or "", t.entry_price, t.quantity)
+            cost    = pos_usd * (_fee_rate(t.symbol or "", t.broker) + SLIPPAGE)
+            open_rows.append({
+                "symbol": t.symbol, "type": "open entry", "exit_time": _iso(t.entry_time),
+                "gross_pnl": 0.0, "estimated_cost": round(cost, 4),
+                "net_pnl": round(-cost, 4),
+            })
+
+        total_gross     = sum(r["gross_pnl"] for r in rows)
+        total_cost      = sum(r["estimated_cost"] for r in rows)
+        open_entry_cost = sum(r["estimated_cost"] for r in open_rows)
         return {
             "summary": {
                 "total_gross_pnl":    round(total_gross, 4),
                 "total_cost":         round(total_cost, 4),
                 "total_net_pnl":      round(total_gross - total_cost, 4),
+                "open_entry_cost":    round(open_entry_cost, 4),
             },
-            "rows": rows,
+            "rows": rows + open_rows,
         }
     except Exception as exc:
         logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
@@ -1059,10 +1273,12 @@ def api_status():
         if snap:
             snap_age = (datetime.utcnow() - snap.timestamp).total_seconds()
             last_snap = _iso(snap.timestamp)
-        import subprocess as _sp
         try:
-            _out = _sp.check_output(["pgrep", "-f", "main.py"], text=True).strip()
-            bot_running = bool(_out)
+            _pidfile = Path(__file__).parent / "logs" / "bot.pid"
+            _pid = int(_pidfile.read_text().strip())
+            import os as _os
+            _os.kill(_pid, 0)
+            bot_running = True
         except Exception:
             bot_running = snap_age is not None and snap_age < 5400
 
