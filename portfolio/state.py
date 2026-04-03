@@ -102,12 +102,11 @@ class Position:
         )
 
 
-# ---------------------------------------------------------------------------
 def _calc_pnl_usd(symbol: str, direction: str, entry: float, exit_price: float, qty: float) -> float:
-    """Compute realised P&L in USD, applying quote-currency conversion for USD-base forex pairs.
+    """Compute realised P&L in USD.
 
-    USDJPY/USDCHF/USDCAD: price is quote-currency per 1 USD.  Raw P&L is in that
-    quote currency, so divide by exit_price to convert back to USD.
+    USD-base forex (USDJPY/USDCHF/USDCAD): price is quote-currency per 1 USD.
+    Raw P&L is in quote currency → divide by exit_price to convert to USD.
     All other instruments: raw P&L is already in USD.
     """
     try:
@@ -122,9 +121,7 @@ def _calc_pnl_usd(symbol: str, direction: str, entry: float, exit_price: float, 
     else:
         raw = (entry - exit_price) * qty
 
-    if is_usd_base and exit_price:
-        return raw / exit_price
-    return raw
+    return raw / exit_price if (is_usd_base and exit_price) else raw
 
 
 # PortfolioStateManager

@@ -101,7 +101,8 @@ def _forex_vol_multiplier(symbol: str, atr: Optional[float], current_price: floa
         return 0.75
 
 # ATR-based stop multipliers (fixed per asset type)
-_ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 3.0, "crypto": 2.0}
+# Stock raised 2.0→2.5 to reduce stop-outs from 1h noise; TP scaled proportionally to keep ~2:1 R:R
+_ATR_SL_MULT: dict[str, float] = {"stock": 2.5, "forex": 3.0, "crypto": 2.0}
 
 # Minimum stop distance for forex as a fraction of entry price.
 # Guards against low-ATR entries (calm-market periods) where 3×ATR still
@@ -110,13 +111,13 @@ _ATR_SL_MULT: dict[str, float] = {"stock": 2.0, "forex": 3.0, "crypto": 2.0}
 _FOREX_MIN_STOP_PCT: float = 0.004
 
 # ATR-based TP multipliers — scale with confidence tier for better R:R on high-conviction trades
-# Stocks: lower multiplier because stock ATR% is already large (0.5–2% per 1h bar)
-# Tier:   SMALL  MEDIUM  LARGE  FULL
+# Stocks: scaled ×1.25 vs old values to maintain ~2:1 R:R with the wider 2.5×ATR stop
+# Tier:   SMALL  MEDIUM  LARGE   FULL
 _ATR_TP_MULT_BY_TIER: dict[str, float] = {
-    "SMALL":  4.0,
-    "MEDIUM": 5.0,
-    "LARGE":  6.0,
-    "FULL":   6.5,
+    "SMALL":  5.0,
+    "MEDIUM": 6.25,
+    "LARGE":  7.5,
+    "FULL":   8.125,
 }
 _ATR_TP_MULT_DEFAULT = 5.0  # fallback if tier not found
 
@@ -148,6 +149,7 @@ _RISK_TIER_MULT: dict[str, float] = {
 # Compensates for forex's tiny pip moves: at 1× a SMALL EURUSD position is ~100 units;
 # at 2× it reaches ~200 units, still well within the per-broker risk cap.
 _FOREX_SIZE_MULT = 1.5
+_MAX_POSITION_FRACTION = 0.667   # max single position = 2/3 of broker pool
 
 
 # ---------------------------------------------------------------------------
@@ -251,13 +253,23 @@ class RiskAgent:
         # ── Step 1: size_fraction from tier ───────────────────────────────
         size_fraction = tier.size_fraction()
 
-        # ── Step 2: max position = 2/3 of this broker's compounded capital ──
-        # Compound realized gains into the capital base so closed profits
-        # grow the available budget for new positions.
-        broker_cap = settings.bot.broker_capital(instrument.broker)
+        # ── Step 2: max position = 2/3 of this broker's compounded capital,
+        # capped by available cash so already-deployed positions are accounted for.
+        base_cap = settings.bot.broker_capital(instrument.broker)
+        available_cash = None
         if self._state is not None:
-            broker_cap = broker_cap + self._state.realized_pnl_by_broker(instrument.broker)
-        max_position_usd = broker_cap * 0.667
+            available_cash = self._state.available_cash(broker=instrument.broker)
+            # Reconstruct running pool (base + realized) from available_cash to avoid
+            # a second DB call to realized_pnl_by_broker (available_cash already queries it).
+            # available_cash = running_pool - reserve - deployed  →  running_pool = available_cash + reserve + deployed
+            reserve = base_cap * settings.bot.cash_reserve_pct
+            deployed = self._state.deployed_capital(broker=instrument.broker)
+            broker_cap = available_cash + reserve + deployed
+        else:
+            broker_cap = base_cap
+        max_position_usd = broker_cap * _MAX_POSITION_FRACTION
+        if available_cash is not None:
+            max_position_usd = min(max_position_usd, available_cash)
 
         # ── Step 3: target position in USD ────────────────────────────────
         position_size_usd = max_position_usd * size_fraction
@@ -300,15 +312,14 @@ class RiskAgent:
             )
 
         # ── Step 4: clamp to available cash in this broker's pool ────────
-        if self._state is not None:
-            available = self._state.available_cash(broker=instrument.broker)
-            if available < instrument.min_position_usd:
+        if available_cash is not None:
+            if available_cash < instrument.min_position_usd:
                 logger.debug(
                     "RiskAgent: %s insufficient cash (available=%.2f < min=%.2f)",
-                    symbol, available, instrument.min_position_usd,
+                    symbol, available_cash, instrument.min_position_usd,
                 )
                 return None
-            position_size_usd = min(position_size_usd, available)
+            position_size_usd = min(position_size_usd, available_cash)
 
         # ── Step 5: raw quantity ───────────────────────────────────────────
         if current_price <= 0:
@@ -332,9 +343,7 @@ class RiskAgent:
             )
             return None
 
-        # ── Step 6: recompute position_size_usd after rounding ────────────
-        # For USD-base forex: position value = quantity (1 unit = 1 USD)
-        # For all others: position value = quantity * price
+        # ── Step 6: recompute position_size after rounding ──────────────────
         if instrument.asset_type == "forex" and symbol.upper().startswith("USD"):
             position_size_usd = quantity
         else:
@@ -515,7 +524,7 @@ def test_risk_agent() -> None:
     # EURUSD is forex → broker="oanda" → uses broker_capital("oanda")
     # EVZ cache defaults to 7.0 → _EVZ_MEDIUM threshold (6.5) hit → mult=0.75
     oanda_cap = settings.bot.broker_capital("oanda")
-    max_pos_oanda = oanda_cap * 0.667
+    max_pos_oanda = oanda_cap * _MAX_POSITION_FRACTION
     evz_mult = _forex_vol_multiplier("EURUSD", None, 1.08)   # 0.75 at default EVZ=7.0
     cr_small = make_cr(PositionTier.SMALL, "long")
     rp = agent.compute(cr_small, current_price=1.08, symbol="EURUSD")
@@ -533,7 +542,7 @@ def test_risk_agent() -> None:
     # ── Test 2: FULL tier — SPY at $500 ──────────────────────────────────
     # SPY is stock → broker="ibkr" → uses broker_capital("ibkr")
     ibkr_cap = settings.bot.broker_capital("ibkr")
-    max_pos_ibkr = ibkr_cap * 0.667
+    max_pos_ibkr = ibkr_cap * _MAX_POSITION_FRACTION
     cr_full = make_cr(PositionTier.FULL, "long")
     rp2 = agent.compute(cr_full, current_price=500.0, symbol="SPY")
     assert rp2 is not None, "FULL tier should produce RiskParams"
