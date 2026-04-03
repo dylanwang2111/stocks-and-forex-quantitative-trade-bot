@@ -7,6 +7,7 @@ Or:   python main.py --mode dashboard_v2
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -14,6 +15,15 @@ import os
 import secrets
 import socket
 import time
+
+# Import ib_insync at module level (main thread has an event loop at load time).
+# eventkit (ib_insync dependency) calls asyncio.get_event_loop() on import,
+# which raises RuntimeError in Python 3.12+ if done inside a worker thread.
+try:
+    from ib_insync import IB as _IB, util as _ib_util
+    _IB_AVAILABLE = True
+except Exception:
+    _IB_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 from contextlib import contextmanager
@@ -97,11 +107,18 @@ def get_db():
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
+_main_loop: asyncio.AbstractEventLoop | None = None
+
 app = FastAPI(
     title="Trade Bot Dashboard v2",
     docs_url=None,
     redoc_url=None,
 )
+
+@app.on_event("startup")
+async def _capture_event_loop():
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],          # block all cross-origin requests
@@ -167,32 +184,56 @@ def _fetch_oanda_live() -> dict | None:
 
 
 def _fetch_ibkr_live() -> dict | None:
-    """Fetch live account values from IBKR via ib_insync."""
+    """Fetch live account values from IBKR via ib_insync.
+
+    Runs in a subprocess to avoid event-loop conflicts between ib_insync's
+    eventkit and FastAPI's AnyIO loop.
+    """
+    if not _IB_AVAILABLE:
+        return {"status": "offline", "error": "ib_insync not installed"}
+
+    import subprocess, sys, json as _json
+    host     = settings.ibkr.host
+    port     = settings.ibkr.port
+    dash_cid = int(os.getenv("IBKR_DASH_CLIENT_ID", "99"))
+
+    script = f"""
+import asyncio, json
+from ib_insync import IB, util
+util.logToConsole('CRITICAL')
+
+async def main():
+    ib = IB()
+    await ib.connectAsync({host!r}, {port}, clientId={dash_cid}, timeout=8)
+    await asyncio.sleep(3)
+    vals = {{}}
+    for v in ib.accountValues():
+        if v.currency in ('USD', 'BASE') and v.value not in ('', 'N/A'):
+            try:
+                vals[v.tag] = float(v.value)
+            except (ValueError, TypeError):
+                pass
+    ib.disconnect()
+    print(json.dumps({{
+        'balance':        round(vals.get('TotalCashBalance',         vals.get('TotalCashValue',  0)), 2),
+        'nav':            round(vals.get('NetLiquidationByCurrency', vals.get('NetLiquidation',  0)), 2),
+        'unrealized_pnl': round(vals.get('UnrealizedPnL',  0), 2),
+        'realized_pnl':   round(vals.get('RealizedPnL',    0), 2),
+        'gross_pnl':      round(vals.get('StockMarketValue', vals.get('GrossPositionValue', 0)), 2),
+        'status':         'live',
+    }}))
+
+asyncio.run(main())
+"""
     try:
-        import asyncio
-        from ib_insync import IB, util
-        util.logToConsole(logging.CRITICAL)  # suppress ib_insync noise
-        # AnyIO worker threads have no event loop — create one so ib_insync works
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        host      = settings.ibkr.host
-        port      = settings.ibkr.port
-        # Use a dedicated dashboard client ID — never conflicts with the bot
-        dash_cid  = int(os.getenv("IBKR_DASH_CLIENT_ID", "99"))
-        ib = IB()
-        ib.connect(host, port, clientId=dash_cid, timeout=8, readonly=True)
-        vals = {v.tag: float(v.value) for v in ib.accountValues()
-                if v.currency in ("USD", "BASE") and v.value not in ("", "N/A")}
-        ib.disconnect()
-        loop.close()
-        return {
-            "balance":        round(vals.get("TotalCashValue",     0), 2),
-            "nav":            round(vals.get("NetLiquidation",     0), 2),
-            "unrealized_pnl": round(vals.get("UnrealizedPnL",      0), 2),
-            "realized_pnl":   round(vals.get("RealizedPnL",        0), 2),
-            "gross_pnl":      round(vals.get("GrossPositionValue", 0), 2),
-            "status":         "live",
-        }
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return _json.loads(result.stdout.strip())
+        err = (result.stderr or "").strip().splitlines()
+        return {"status": "offline", "error": err[-1] if err else "unknown error"}
     except Exception as exc:
         logger.warning("IBKR account sync failed: %s", exc)
         return {"status": "offline", "error": str(exc)}
