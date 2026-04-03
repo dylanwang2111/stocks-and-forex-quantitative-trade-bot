@@ -169,8 +169,12 @@ def _fetch_oanda_live() -> dict | None:
 def _fetch_ibkr_live() -> dict | None:
     """Fetch live account values from IBKR via ib_insync."""
     try:
+        import asyncio
         from ib_insync import IB, util
         util.logToConsole(logging.CRITICAL)  # suppress ib_insync noise
+        # AnyIO worker threads have no event loop — create one so ib_insync works
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         host      = settings.ibkr.host
         port      = settings.ibkr.port
         # Use a dedicated dashboard client ID — never conflicts with the bot
@@ -180,6 +184,7 @@ def _fetch_ibkr_live() -> dict | None:
         vals = {v.tag: float(v.value) for v in ib.accountValues()
                 if v.currency in ("USD", "BASE") and v.value not in ("", "N/A")}
         ib.disconnect()
+        loop.close()
         return {
             "balance":        round(vals.get("TotalCashValue",     0), 2),
             "nav":            round(vals.get("NetLiquidation",     0), 2),
