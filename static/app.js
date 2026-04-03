@@ -181,6 +181,15 @@ let tradesSortCol    = 'time';
 let tradesSortDir    = -1;        // -1 = desc, 1 = asc
 let tradesColFilters = {};        // { col: Set<string> }  — active value selections per column
 
+// Signals table sort/filter state
+let sigColFilters    = {};        // { col: Set<string> }  — active value selections per column
+let sigSortCol       = 'timestamp';
+let sigSortDir       = -1;        // -1 = desc, 1 = asc
+let sigDateChecked   = new Set(); // Set of "Y-M-D-H" leaf strings; empty = no filter
+let sigDatePending   = new Set(); // working copy while dropdown is open
+let sigColDdActiveCol = null;
+let _sigDdTh         = null;
+
 /* ── Chart.js defaults ─────────────────────────────────────────────────────── */
 Chart.defaults.font.family = "'IBM Plex Mono', monospace";
 Chart.defaults.font.size = 11;
@@ -299,8 +308,26 @@ document.querySelectorAll('.nav-link[data-page]').forEach(link => {
   link.addEventListener('click', e => {
     e.preventDefault();
     navigate(link.dataset.page);
+    closeNav(); // close hamburger menu on mobile
   });
 });
+
+/* ── Mobile hamburger nav ──────────────────────────────────────────────────── */
+function openNav() {
+  document.body.classList.add('nav-open');
+  const btn = document.getElementById('nav-toggle');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+}
+function closeNav() {
+  document.body.classList.remove('nav-open');
+  const btn = document.getElementById('nav-toggle');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+document.getElementById('nav-toggle')?.addEventListener('click', () => {
+  document.body.classList.contains('nav-open') ? closeNav() : openNav();
+});
+document.getElementById('nav-backdrop')?.addEventListener('click', closeNav);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeNav(); });
 
 function refreshPage(page) {
   const fns = {
@@ -448,7 +475,61 @@ async function renderOverview() {
   const openPos = await apiFetch('/api/positions');
   _renderOvPositionsMini(openPos);
   _renderOvPositionsFull(openPos);
+
+  // Broker sync bar
+  renderBrokerSync();
 }
+
+/* ── Broker sync bar ───────────────────────────────────────────────────────── */
+async function renderBrokerSync(force = false) {
+  const btn = document.getElementById('bsb-sync-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ Syncing…'; }
+
+  const url = force ? '/api/broker-sync?force=true' : '/api/broker-sync';
+  const d = await apiFetch(url);
+
+  if (btn) { btn.disabled = false; btn.textContent = '⟳ Sync'; }
+  if (!d) return;
+
+  const isLiveMode = d.trading_mode === 'live';
+  function applyPill(elId, valElId, info) {
+    const pill = document.getElementById(elId);
+    const valEl = document.getElementById(valElId);
+    if (!pill || !valEl) return;
+    const live = info?.status === 'live';
+    pill.classList.toggle('live', live);
+    pill.classList.toggle('offline', !live);
+    if (live) {
+      if (isLiveMode) {
+        const nav = info.nav ?? info.balance;
+        valEl.textContent = nav != null ? fmtUSD(nav) : '—';
+      } else {
+        valEl.textContent = 'Paper ✓';
+      }
+    } else {
+      valEl.textContent = '—';
+    }
+  }
+
+  applyPill('bsb-oanda', 'bsb-oanda-val', d.oanda);
+  applyPill('bsb-ibkr',  'bsb-ibkr-val',  d.ibkr);
+
+  const ts = document.getElementById('bsb-synced-at');
+  if (ts && d.synced_at) {
+    ts.textContent = 'synced ' + fmtTime(d.synced_at);
+  }
+
+  const bar = document.getElementById('broker-sync-bar');
+  if (bar) {
+    const anyLive = d.oanda?.status === 'live' || d.ibkr?.status === 'live';
+    bar.style.display = anyLive ? '' : 'none';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const syncBtn = document.getElementById('bsb-sync-btn');
+  if (syncBtn) syncBtn.addEventListener('click', () => renderBrokerSync(true));
+});
 
 function _renderOvPositionsMini(data) {
   const tbody = document.querySelector('#ov-open-table tbody');
@@ -812,11 +893,43 @@ async function renderSignals() {
 function renderSigTable() {
   const tbody = document.querySelector('#sig-table tbody');
   if (!tbody) return;
-  const total = sigAllSignals.length;
+
+  // Apply client-side column filters
+  let rows = [...sigAllSignals];
+
+  // Date filter
+  if (sigDateChecked.size > 0) {
+    rows = rows.filter(s => {
+      if (!s.timestamp) return false;
+      const dt = new Date(String(s.timestamp).replace(' ', 'T'));
+      const k  = `${dt.getFullYear()}-${dt.getMonth()+1}-${dt.getDate()}-${dt.getHours()}`;
+      return sigDateChecked.has(k);
+    });
+  }
+
+  // Column value filters
+  for (const [col, sel] of Object.entries(sigColFilters)) {
+    if (!sel || sel.size === 0) continue;
+    rows = rows.filter(s => {
+      const v = String(sigColVal(s, col) ?? '').toLowerCase();
+      return sel.has(v);
+    });
+  }
+
+  // Sort
+  rows.sort((a, b) => {
+    const av = sigColVal(a, sigSortCol);
+    const bv = sigColVal(b, sigSortCol);
+    if (av < bv) return -sigSortDir;
+    if (av > bv) return  sigSortDir;
+    return 0;
+  });
+
+  const total = rows.length;
   const pages = Math.max(1, Math.ceil(total / SIG_PAGE_SIZE));
   sigPage = Math.min(sigPage, pages);
   const start = (sigPage - 1) * SIG_PAGE_SIZE;
-  const slice = sigAllSignals.slice(start, start + SIG_PAGE_SIZE);
+  const slice = rows.slice(start, start + SIG_PAGE_SIZE);
 
   tbody.innerHTML = slice.map(s => `
     <tr>
@@ -833,6 +946,7 @@ function renderSigTable() {
     </tr>`).join('');
 
   renderPagination('sig-pagination', sigPage, pages, total, p => { sigPage = p; renderSigTable(); });
+  updateSigColDdIndicators();
 }
 
 function riskBadge(risk) {
@@ -870,8 +984,43 @@ function tradeColVal(row, col) {
   }
 }
 
+function sigColVal(s, col) {
+  switch (col) {
+    case 'timestamp':  return s.timestamp || '';
+    case 'symbol':     return s.symbol || '';
+    case 'direction':  return s.direction || '';
+    case 'c1':         return s.c1 ?? -Infinity;
+    case 'c2':         return s.c2 ?? -Infinity;
+    case 'c3':         return s.c3 ?? -Infinity;
+    case 'c4':         return s.c4 ?? -Infinity;
+    case 'c5':         return s.c5 ?? -Infinity;
+    case 'c6':         return s.c6 ?? -Infinity;
+    case 'c7':         return s.c7 ?? -Infinity;
+    case 'c8':         return s.c8 ?? -Infinity;
+    case 'score':      return s.score ?? -Infinity;
+    case 'tier':       return s.tier || '';
+    case 'regime':     return s.regime || '';
+    case 'macro_risk': return s.macro_risk || '';
+    default:           return '';
+  }
+}
+
 function applyTradesFiltersAndSort() {
   let rows = [...tradesAllRows];
+
+  // Date filter (multi-select: Set of "Y-M-D-H" leaf keys; empty = show all)
+  if (tradesDateChecked.size > 0) {
+    rows = rows.filter(r => {
+      if (!r.time) return false;
+      const dt = new Date(String(r.time).replace(' ', 'T'));
+      const k = `${dt.getFullYear()}-${dt.getMonth()+1}-${dt.getDate()}-${dt.getHours()}`;
+      return tradesDateChecked.has(k);
+    });
+  }
+
+  // Symbol dropdown filter
+  const sym = document.getElementById('tr-sym-filter')?.value || '';
+  if (sym) rows = rows.filter(r => r.symbol === sym);
 
   // Column value filters (each col has a Set of selected values; empty Set = no filter)
   for (const [col, sel] of Object.entries(tradesColFilters)) {
@@ -891,7 +1040,28 @@ function applyTradesFiltersAndSort() {
     return 0;
   });
 
-  renderTradesRows(rows);
+  // Compute summary from filtered rows
+  const closes       = rows.filter(r => r.type === 'CLOSE');
+  const partialRows  = rows.filter(r => r.type && r.type.includes('PARTIAL'));
+  const wins         = closes.filter(r => (r.pnl_usd || 0) > 0).length;
+  const partials     = partialRows.length;
+  const closedPnl    = closes.reduce((s, r) => s + (r.pnl_usd || 0), 0);
+  const partialPnl   = partialRows.reduce((s, r) => s + (r.pnl_usd || 0), 0);
+  setText('tr-realized', fmtUSD(closedPnl + partialPnl));
+  setText('tr-winrate',  closes.length ? (wins / closes.length * 100).toFixed(1) + '%' : '—');
+  setText('tr-closes',   String(closes.length));
+  setText('tr-partials', String(partials));
+
+  // Client-side pagination
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / TRADES_PAGE_SIZE));
+  if (tradesPage > pages) tradesPage = 1;
+  const slice = rows.slice((tradesPage - 1) * TRADES_PAGE_SIZE, tradesPage * TRADES_PAGE_SIZE);
+
+  renderTradesRows(slice);
+  renderPagination('trades-pagination', tradesPage, pages, total, p => {
+    tradesPage = p; applyTradesFiltersAndSort();
+  });
   updateColDdIndicators();
 }
 
@@ -904,12 +1074,32 @@ function updateColDdIndicators() {
     const col = th.dataset.col;
     const btn = th.querySelector('.col-dd-btn');
     if (!btn) return;
-    const hasFilter = tradesColFilters[col]?.size > 0;
-    const isSort    = col === tradesSortCol;
+    const hasFilter = col === 'time'
+      ? tradesDateChecked.size > 0
+      : tradesColFilters[col]?.size > 0;
+    const isSort = col === tradesSortCol;
     btn.classList.toggle('col-dd-active', hasFilter || isSort);
-    // Show sort arrow in btn when this column is sorted
     if (isSort) {
       btn.textContent = tradesSortDir === -1 ? '↓' : '↑';
+    } else if (!hasFilter) {
+      btn.textContent = '⌄';
+    }
+    if (hasFilter && !isSort) btn.textContent = '▾';
+  });
+}
+
+function updateSigColDdIndicators() {
+  document.querySelectorAll('#sig-sort-row th[data-col]').forEach(th => {
+    const col = th.dataset.col;
+    const btn = th.querySelector('.sig-col-dd-btn');
+    if (!btn) return;
+    const hasFilter = col === 'timestamp'
+      ? sigDateChecked.size > 0
+      : sigColFilters[col]?.size > 0;
+    const isSort = col === sigSortCol;
+    btn.classList.toggle('col-dd-active', hasFilter || isSort);
+    if (isSort) {
+      btn.textContent = sigSortDir === -1 ? '↓' : '↑';
     } else if (!hasFilter) {
       btn.textContent = '⌄';
     }
@@ -1007,47 +1197,32 @@ function renderTradesRows(rows) {
   }).join('');
 }
 
-async function renderTrades() {
-  const sym = document.getElementById('tr-sym-filter')?.value || '';
-  const params = new URLSearchParams({ page: tradesPage, page_size: TRADES_PAGE_SIZE });
-  if (sym) params.set('symbol', sym);
+// Date filter state — committed (applied) and pending (while dropdown is open)
+let tradesDateChecked = new Set(); // Set of "Y-M-D-H" leaf strings; empty = no filter
+let tradesDatePending = new Set(); // working copy while dropdown is open
 
-  const data = await apiFetch('/api/trades?' + params);
+async function renderTrades() {
+  // Fetch ALL rows once; all filtering & pagination done client-side
+  const data = await apiFetch('/api/trades?page=1&page_size=9999');
   if (!data) return;
 
-  // Summary
-  const summ = data.summary || {};
-  setText('tr-realized', fmtUSD(summ.realized_pnl));
-  setText('tr-winrate',  summ.win_rate != null ? summ.win_rate.toFixed(1) + '%' : '—');
-  setText('tr-closes',   String(summ.full_closes ?? 0));
-  setText('tr-partials', String(summ.partial_closes ?? 0));
+  tradesAllRows = data.rows || [];
 
-  // Populate symbol filter once
+  // Populate symbol filter once from all rows
   const symSel = document.getElementById('tr-sym-filter');
-  if (symSel && symSel.options.length <= 1 && data.rows?.length) {
-    const syms = [...new Set(data.rows.map(r => r.symbol).filter(Boolean))].sort();
+  if (symSel && symSel.options.length <= 1 && tradesAllRows.length) {
+    const syms = [...new Set(tradesAllRows.map(r => r.symbol).filter(Boolean))].sort();
     symSel.innerHTML = '<option value="">All</option>' +
-      syms.map(s => `<option value="${esc(s)}"${s===sym?' selected':''}>${esc(s)}</option>`).join('');
+      syms.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
   }
 
-  tradesAllRows = data.rows || [];
   applyTradesFiltersAndSort();
-
-  renderPagination('trades-pagination', data.page, data.pages, data.total, p => {
-    tradesPage = p; renderTrades();
-  });
-
-  // Cumulative P&L chart — fetch all rows (not just current page)
   renderTradesCumChart();
 }
 
-async function renderTradesCumChart() {
-  // Fetch all closed/partial rows for the chart regardless of current page/filter
-  const all = await apiFetch('/api/trades?page=1&page_size=9999');
-  if (!all?.rows) return;
-
+function renderTradesCumChart() {
   // Collect events with PnL: CLOSE and PARTIAL rows only
-  const events = all.rows
+  const events = tradesAllRows
     .filter(r => r.pnl_usd != null && r.time)
     .sort((a, b) => (a.time < b.time ? -1 : 1));
 
@@ -1126,6 +1301,24 @@ function round2(v) { return Math.round(v * 100) / 100; }
 
 /* ── Column dropdown (Excel-style AutoFilter) ─────────────────────────────── */
 let colDdActiveCol = null;
+let _ddTh = null; // TH element the dropdown is anchored to
+
+function _positionDd(dd, th, w) {
+  const rect = th.getBoundingClientRect();
+  let left = rect.left;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if (left < 4) left = 4;
+  dd.style.left = left + 'px';
+  dd.style.top  = (rect.bottom + 4) + 'px';
+}
+
+function _onScrollReposition() {
+  const dd = document.getElementById('col-dd');
+  if (!dd || dd.style.display === 'none' || !_ddTh) return;
+  _positionDd(dd, _ddTh, parseInt(dd.style.width) || 210);
+}
+// Catch all scroll events (page, table horizontal, any container)
+document.addEventListener('scroll', _onScrollReposition, { passive: true, capture: true });
 
 function openColDd(col, triggerEl) {
   const dd = document.getElementById('col-dd');
@@ -1136,16 +1329,12 @@ function openColDd(col, triggerEl) {
     closeColDd(); return;
   }
   colDdActiveCol = col;
+  _ddTh = triggerEl.closest('th');
 
-  // Position — fixed coords are viewport-relative; no scroll offset needed
-  const rect = triggerEl.closest('th').getBoundingClientRect();
   dd.style.display = 'block';
-  const ddW = 210;
-  let left = rect.left;
-  if (left + ddW > window.innerWidth - 8) left = window.innerWidth - ddW - 8;
-  if (left < 4) left = 4;
-  dd.style.left = left + 'px';
-  dd.style.top  = (rect.bottom + 4) + 'px';
+  const ddW = col === 'time' ? 230 : 210;
+  dd.style.width = ddW + 'px';
+  _positionDd(dd, _ddTh, ddW);
 
   // Sort buttons
   dd.querySelectorAll('.col-dd-sort-btn').forEach(btn => {
@@ -1157,16 +1346,296 @@ function openColDd(col, triggerEl) {
     };
   });
 
-  // Populate value list from ALL current rows (pre-filter snapshot for this col)
+  const search  = document.getElementById('col-dd-search');
+  const list    = document.getElementById('col-dd-list');
+  const clearBtn   = document.getElementById('col-dd-clear');
+  const selAllBtn  = document.getElementById('col-dd-selectall');
+
+  // ── Excel-style date tree for the time column ─────────────────────────
+  if (col === 'time') {
+    if (search) { search.style.display = ''; search.value = ''; search.placeholder = 'Search date…'; }
+    if (clearBtn)  { clearBtn.textContent  = 'Cancel'; }
+    if (selAllBtn) { selAllBtn.textContent = 'OK'; selAllBtn.style.display = ''; }
+
+    tradesDatePending = new Set(tradesDateChecked);
+
+    const MONTHS = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // Build tree: { year: { month: { day: Set<hour> } } }
+    const tree = {};
+    tradesAllRows.forEach(r => {
+      if (!r.time) return;
+      const dt = new Date(String(r.time).replace(' ', 'T'));
+      const y = dt.getFullYear(), m = dt.getMonth()+1, d = dt.getDate(), h = dt.getHours();
+      if (!tree[y]) tree[y] = {};
+      if (!tree[y][m]) tree[y][m] = {};
+      if (!tree[y][m][d]) tree[y][m][d] = new Set();
+      tree[y][m][d].add(h);
+    });
+
+    function lk(y, m, d, h) { return `${y}-${m}-${d}-${h}`; }
+
+    function leavesFor(y, m, d) {
+      const keys = [];
+      const ys = y != null ? [y] : Object.keys(tree).map(Number);
+      ys.forEach(yr => {
+        const ms = m != null ? [m] : Object.keys(tree[yr]||{}).map(Number);
+        ms.forEach(mo => {
+          const ds = d != null ? [d] : Object.keys((tree[yr]||{})[mo]||{}).map(Number);
+          ds.forEach(dy => {
+            ((tree[yr]||{})[mo]||{})[dy]?.forEach(h => keys.push(lk(yr, mo, dy, h)));
+          });
+        });
+      });
+      return keys;
+    }
+
+    function pState(leaves) {
+      const n = leaves.filter(k => tradesDatePending.has(k)).length;
+      if (n === 0) return 'none';
+      if (n === leaves.length) return 'all';
+      return 'some';
+    }
+
+    function setCb(el, state) {
+      if (!el) return;
+      el.checked = state === 'all';
+      el.indeterminate = state === 'some';
+    }
+
+    function updateCbStates() {
+      if (!list) return;
+      list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+        cb.checked = tradesDatePending.has(lk(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d, +cb.dataset.h));
+        cb.indeterminate = false;
+      });
+      list.querySelectorAll('input.ddt-cb[data-d]:not([data-h])').forEach(cb =>
+        setCb(cb, pState(leavesFor(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d))));
+      list.querySelectorAll('input.ddt-cb[data-m]:not([data-d])').forEach(cb =>
+        setCb(cb, pState(leavesFor(+cb.dataset.y, +cb.dataset.m, null))));
+      list.querySelectorAll('input.ddt-cb[data-y]:not([data-m])').forEach(cb =>
+        setCb(cb, pState(leavesFor(+cb.dataset.y, null, null))));
+      setCb(list.querySelector('#ddt-sa'), pState(leavesFor(null, null, null)));
+    }
+
+    // Restore expanded state: auto-open ancestors of any committed selection
+    const ddtExp = new Set();
+    tradesDateChecked.forEach(key => {
+      const [y, m, d] = key.split('-');
+      ddtExp.add(`ddt-y${y}`);
+      ddtExp.add(`ddt-m${y}-${m}`);
+      ddtExp.add(`ddt-d${y}-${m}-${d}`);
+    });
+
+    function buildDdtTree(q) {
+      if (!list) return;
+      q = (q || '').toLowerCase().trim();
+      const years = Object.keys(tree).map(Number).sort((a,b) => b-a);
+      let html = '';
+
+      if (q) {
+        // ── Flat search results ──
+        const matches = [];
+        years.forEach(y => {
+          Object.keys(tree[y]).map(Number).sort((a,b)=>a-b).forEach(m => {
+            Object.keys(tree[y][m]).map(Number).sort((a,b)=>a-b).forEach(d => {
+              [...tree[y][m][d]].sort((a,b)=>a-b).forEach(h => {
+                const label = `${y} › ${MONTHS[m]} › ${String(d).padStart(2,'0')} › ${String(h).padStart(2,'0')}:00`;
+                if (label.toLowerCase().includes(q)) matches.push({y,m,d,h,label});
+              });
+            });
+          });
+        });
+
+        if (!matches.length) {
+          list.innerHTML = '<div class="ddt-empty">No matches</div>';
+          return;
+        }
+
+        const matchKeys = matches.map(({y,m,d,h}) => lk(y,m,d,h));
+        const saState = pState(matchKeys);
+        html = `<div class="ddt-item">
+          <input type="checkbox" class="ddt-cb" id="ddt-sa">
+          <label for="ddt-sa" class="ddt-bold">Select All Results</label>
+          <span class="ddt-x" id="ddt-ca" title="Clear filter">✕</span>
+        </div><div class="ddt-sep"></div>` +
+          matches.map(({y,m,d,h,label}) => {
+            const k = lk(y,m,d,h);
+            return `<div class="ddt-item ddt-flat">
+              <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" data-d="${d}" data-h="${h}" id="ddt-r${k}">
+              <label for="ddt-r${k}" class="ddt-lbl">${label}</label>
+            </div>`;
+          }).join('');
+
+        list.innerHTML = html;
+        matches.forEach(({y,m,d,h}) => {
+          const cb = list.querySelector(`#ddt-r${lk(y,m,d,h)}`);
+          if (cb) { cb.checked = tradesDatePending.has(lk(y,m,d,h)); cb.indeterminate = false; }
+        });
+        const saEl = list.querySelector('#ddt-sa');
+        setCb(saEl, saState);
+
+        list.querySelector('#ddt-ca')?.addEventListener('click', () => {
+          tradesDatePending.clear();
+          list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => { cb.checked = false; cb.indeterminate = false; });
+          setCb(saEl, 'none');
+        });
+
+        saEl?.addEventListener('change', () => {
+          matchKeys.forEach(k => saEl.checked ? tradesDatePending.add(k) : tradesDatePending.delete(k));
+          list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+            cb.checked = tradesDatePending.has(lk(+cb.dataset.y,+cb.dataset.m,+cb.dataset.d,+cb.dataset.h));
+          });
+          setCb(saEl, pState(matchKeys));
+        });
+        list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+          cb.addEventListener('change', () => {
+            const k = lk(+cb.dataset.y,+cb.dataset.m,+cb.dataset.d,+cb.dataset.h);
+            cb.checked ? tradesDatePending.add(k) : tradesDatePending.delete(k);
+            setCb(saEl, pState(matchKeys));
+          });
+        });
+        return;
+      }
+
+      // ── Tree mode ──
+      const allLeaves = leavesFor(null, null, null);
+      html = `<div class="ddt-item">
+        <input type="checkbox" class="ddt-cb" id="ddt-sa">
+        <label for="ddt-sa" class="ddt-bold">Select All</label>
+        <span class="ddt-x" id="ddt-ca" title="Clear filter">✕</span>
+      </div><div class="ddt-sep"></div>`;
+
+      years.forEach(y => {
+        const yId = `ddt-y${y}`;
+        const yOpen = ddtExp.has(yId);
+        html += `<div class="ddt-item">
+          <input type="checkbox" class="ddt-cb" data-y="${y}" id="cb-y${y}">
+          <span class="ddt-arr${yOpen?' open':''}" data-cid="${yId}">›</span>
+          <label for="cb-y${y}" class="ddt-lbl">${y}</label>
+        </div><div id="${yId}" class="ddt-ch"${yOpen?'':' style="display:none"'}>`;
+
+        Object.keys(tree[y]).map(Number).sort((a,b)=>a-b).forEach(m => {
+          const mId = `ddt-m${y}-${m}`;
+          const mOpen = ddtExp.has(mId);
+          html += `<div class="ddt-item">
+            <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" id="cb-m${y}-${m}">
+            <span class="ddt-arr${mOpen?' open':''}" data-cid="${mId}">›</span>
+            <label for="cb-m${y}-${m}" class="ddt-lbl">${MONTHS[m]}</label>
+          </div><div id="${mId}" class="ddt-ch"${mOpen?'':' style="display:none"'}>`;
+
+          Object.keys(tree[y][m]).map(Number).sort((a,b)=>a-b).forEach(d => {
+            const dId = `ddt-d${y}-${m}-${d}`;
+            const dOpen = ddtExp.has(dId);
+            html += `<div class="ddt-item">
+              <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" data-d="${d}" id="cb-d${y}-${m}-${d}">
+              <span class="ddt-arr${dOpen?' open':''}" data-cid="${dId}">›</span>
+              <label for="cb-d${y}-${m}-${d}" class="ddt-lbl">${String(d).padStart(2,'0')}</label>
+            </div><div id="${dId}" class="ddt-ch"${dOpen?'':' style="display:none"'}>`;
+
+            [...tree[y][m][d]].sort((a,b)=>a-b).forEach(h => {
+              html += `<div class="ddt-item">
+                <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" data-d="${d}" data-h="${h}" id="cb-h${y}-${m}-${d}-${h}">
+                <label for="cb-h${y}-${m}-${d}-${h}" class="ddt-lbl">${String(h).padStart(2,'0')}:00</label>
+              </div>`;
+            });
+
+            html += `</div>`; // close day children
+          });
+          html += `</div>`; // close month children
+        });
+        html += `</div>`; // close year children
+      });
+
+      list.innerHTML = html;
+      updateCbStates();
+
+      // Clear All
+      list.querySelector('#ddt-ca')?.addEventListener('click', () => {
+        tradesDatePending.clear();
+        updateCbStates();
+      });
+
+      // Toggle arrows — CSS rotation, don't close dropdown
+      list.querySelectorAll('.ddt-arr').forEach(arr => {
+        arr.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          const cid = arr.dataset.cid;
+          const child = document.getElementById(cid);
+          if (!child) return;
+          const open = child.style.display !== 'none';
+          child.style.display = open ? 'none' : '';
+          arr.classList.toggle('open', !open);
+          open ? ddtExp.delete(cid) : ddtExp.add(cid);
+        });
+      });
+
+      // Select All
+      list.querySelector('#ddt-sa')?.addEventListener('change', e => {
+        allLeaves.forEach(k => e.target.checked ? tradesDatePending.add(k) : tradesDatePending.delete(k));
+        updateCbStates();
+      });
+      // Year
+      list.querySelectorAll('input.ddt-cb[data-y]:not([data-m])').forEach(cb => {
+        cb.addEventListener('change', () => {
+          leavesFor(+cb.dataset.y, null, null)
+            .forEach(k => cb.checked ? tradesDatePending.add(k) : tradesDatePending.delete(k));
+          updateCbStates();
+        });
+      });
+      // Month
+      list.querySelectorAll('input.ddt-cb[data-m]:not([data-d])').forEach(cb => {
+        cb.addEventListener('change', () => {
+          leavesFor(+cb.dataset.y, +cb.dataset.m, null)
+            .forEach(k => cb.checked ? tradesDatePending.add(k) : tradesDatePending.delete(k));
+          updateCbStates();
+        });
+      });
+      // Day
+      list.querySelectorAll('input.ddt-cb[data-d]:not([data-h])').forEach(cb => {
+        cb.addEventListener('change', () => {
+          leavesFor(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d)
+            .forEach(k => cb.checked ? tradesDatePending.add(k) : tradesDatePending.delete(k));
+          updateCbStates();
+        });
+      });
+      // Hour
+      list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const k = lk(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d, +cb.dataset.h);
+          cb.checked ? tradesDatePending.add(k) : tradesDatePending.delete(k);
+          updateCbStates();
+        });
+      });
+    }
+
+    buildDdtTree('');
+    if (search) search.oninput = () => buildDdtTree(search.value);
+
+    // OK — commit pending and apply
+    if (selAllBtn) selAllBtn.onclick = () => {
+      tradesDateChecked = new Set(tradesDatePending);
+      tradesPage = 1; applyTradesFiltersAndSort(); updateColDdIndicators(); closeColDd();
+    };
+    // Cancel — discard pending
+    if (clearBtn) clearBtn.onclick = () => closeColDd();
+
+    return;
+  }
+
+  // ── Generic checkbox filter for all other columns ───────────────────────
+  if (search)   { search.style.display = ''; search.placeholder = 'Search…'; }
+  if (selAllBtn) { selAllBtn.style.display = ''; selAllBtn.textContent = 'Select All'; }
+  if (clearBtn)  { clearBtn.textContent = 'Clear'; }
+  if (search) { search.value = ''; }
+
   const allVals = [...new Set(
     tradesAllRows.map(r => String(tradeColVal(r, col) ?? '').toLowerCase()).filter(v => v !== '' && v !== '-infinity')
   )].sort();
 
   const currentSel = tradesColFilters[col] || new Set();
   tradesColFilters[col] = currentSel;
-  const search = document.getElementById('col-dd-search');
-  const list   = document.getElementById('col-dd-list');
-  if (search) { search.value = ''; }
 
   function renderList(filter) {
     const visible = filter ? allVals.filter(v => v.includes(filter.toLowerCase())) : allVals;
@@ -1177,7 +1646,6 @@ function openColDd(col, triggerEl) {
         <span>${esc(v)}</span>
       </label>
     `).join('');
-    // Live update on checkbox change
     list.querySelectorAll('input[type=checkbox]').forEach(cb => {
       cb.addEventListener('change', () => {
         if (cb.checked) currentSel.add(cb.value);
@@ -1193,16 +1661,12 @@ function openColDd(col, triggerEl) {
     setTimeout(() => search.focus(), 50);
   }
 
-  // Clear button
-  const clearBtn = document.getElementById('col-dd-clear');
   if (clearBtn) clearBtn.onclick = () => {
     tradesColFilters[col] = new Set();
     closeColDd();
     applyTradesFiltersAndSort();
   };
 
-  // Select all button
-  const selAllBtn = document.getElementById('col-dd-selectall');
   if (selAllBtn) selAllBtn.onclick = () => {
     allVals.forEach(v => currentSel.add(v));
     tradesColFilters[col] = currentSel;
@@ -1215,6 +1679,7 @@ function closeColDd() {
   const dd = document.getElementById('col-dd');
   if (dd) dd.style.display = 'none';
   colDdActiveCol = null;
+  _ddTh = null;
 }
 
 // Open dropdown when trigger button is clicked
@@ -1248,7 +1713,406 @@ document.querySelector('#trades-sort-row')?.addEventListener('click', e => {
   if (btn) openColDd(th.dataset.col, btn);
 });
 
-document.getElementById('tr-sym-filter')?.addEventListener('change', () => { tradesPage = 1; renderTrades(); });
+document.getElementById('tr-sym-filter')?.addEventListener('change',   () => { tradesPage = 1; renderTrades(); });
+document.getElementById('tr-year-filter')?.addEventListener('change',  () => { tradesPage = 1; renderTrades(); });
+document.getElementById('tr-month-filter')?.addEventListener('change', () => { tradesPage = 1; renderTrades(); });
+document.getElementById('tr-day-filter')?.addEventListener('change',   () => { tradesPage = 1; renderTrades(); });
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* SIGNALS — Column dropdown (Excel-style AutoFilter)                           */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+function _positionSigDd(dd, th, w) {
+  const rect = th.getBoundingClientRect();
+  let left = rect.left;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if (left < 4) left = 4;
+  dd.style.left = left + 'px';
+  dd.style.top  = (rect.bottom + 4) + 'px';
+}
+
+document.addEventListener('scroll', () => {
+  const dd = document.getElementById('sig-col-dd');
+  if (!dd || dd.style.display === 'none' || !_sigDdTh) return;
+  _positionSigDd(dd, _sigDdTh, parseInt(dd.style.width) || 210);
+}, { passive: true, capture: true });
+
+function openSigColDd(col, triggerEl) {
+  const dd = document.getElementById('sig-col-dd');
+  if (!dd) return;
+
+  // Close if same col clicked again
+  if (sigColDdActiveCol === col && dd.style.display !== 'none') {
+    closeSigColDd(); return;
+  }
+  sigColDdActiveCol = col;
+  _sigDdTh = triggerEl.closest('th');
+
+  dd.style.display = 'block';
+  const ddW = col === 'timestamp' ? 230 : 210;
+  dd.style.width = ddW + 'px';
+  _positionSigDd(dd, _sigDdTh, ddW);
+
+  // Sort buttons
+  dd.querySelectorAll('.sig-col-dd-sort-btn').forEach(btn => {
+    btn.onclick = () => {
+      sigSortCol = col;
+      sigSortDir = btn.dataset.dir === 'asc' ? 1 : -1;
+      sigPage = 1;
+      renderSigTable();
+      closeSigColDd();
+    };
+  });
+
+  const search    = document.getElementById('sig-col-dd-search');
+  const list      = document.getElementById('sig-col-dd-list');
+  const clearBtn  = document.getElementById('sig-col-dd-clear');
+  const selAllBtn = document.getElementById('sig-col-dd-selectall');
+
+  // ── Excel-style date tree for the timestamp column ─────────────────────
+  if (col === 'timestamp') {
+    if (search)   { search.style.display = ''; search.value = ''; search.placeholder = 'Search date…'; }
+    if (clearBtn)  { clearBtn.textContent  = 'Cancel'; }
+    if (selAllBtn) { selAllBtn.textContent = 'OK'; selAllBtn.style.display = ''; }
+
+    sigDatePending = new Set(sigDateChecked);
+
+    const MONTHS = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // Build tree: { year: { month: { day: Set<hour> } } }
+    const tree = {};
+    sigAllSignals.forEach(s => {
+      if (!s.timestamp) return;
+      const dt = new Date(String(s.timestamp).replace(' ', 'T'));
+      const y = dt.getFullYear(), m = dt.getMonth()+1, d = dt.getDate(), h = dt.getHours();
+      if (!tree[y]) tree[y] = {};
+      if (!tree[y][m]) tree[y][m] = {};
+      if (!tree[y][m][d]) tree[y][m][d] = new Set();
+      tree[y][m][d].add(h);
+    });
+
+    function lk(y, m, d, h) { return `${y}-${m}-${d}-${h}`; }
+
+    function leavesFor(y, m, d) {
+      const keys = [];
+      const ys = y != null ? [y] : Object.keys(tree).map(Number);
+      ys.forEach(yr => {
+        const ms = m != null ? [m] : Object.keys(tree[yr]||{}).map(Number);
+        ms.forEach(mo => {
+          const ds = d != null ? [d] : Object.keys((tree[yr]||{})[mo]||{}).map(Number);
+          ds.forEach(dy => {
+            ((tree[yr]||{})[mo]||{})[dy]?.forEach(h => keys.push(lk(yr, mo, dy, h)));
+          });
+        });
+      });
+      return keys;
+    }
+
+    function pState(leaves) {
+      const n = leaves.filter(k => sigDatePending.has(k)).length;
+      if (n === 0) return 'none';
+      if (n === leaves.length) return 'all';
+      return 'some';
+    }
+
+    function setCb(el, state) {
+      if (!el) return;
+      el.checked = state === 'all';
+      el.indeterminate = state === 'some';
+    }
+
+    function updateCbStates() {
+      if (!list) return;
+      list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+        cb.checked = sigDatePending.has(lk(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d, +cb.dataset.h));
+        cb.indeterminate = false;
+      });
+      list.querySelectorAll('input.ddt-cb[data-d]:not([data-h])').forEach(cb =>
+        setCb(cb, pState(leavesFor(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d))));
+      list.querySelectorAll('input.ddt-cb[data-m]:not([data-d])').forEach(cb =>
+        setCb(cb, pState(leavesFor(+cb.dataset.y, +cb.dataset.m, null))));
+      list.querySelectorAll('input.ddt-cb[data-y]:not([data-m])').forEach(cb =>
+        setCb(cb, pState(leavesFor(+cb.dataset.y, null, null))));
+      setCb(list.querySelector('#sddt-sa'), pState(leavesFor(null, null, null)));
+    }
+
+    const ddtExp = new Set();
+    sigDateChecked.forEach(key => {
+      const [y, m, d] = key.split('-');
+      ddtExp.add(`sddt-y${y}`);
+      ddtExp.add(`sddt-m${y}-${m}`);
+      ddtExp.add(`sddt-d${y}-${m}-${d}`);
+    });
+
+    function buildDdtTree(q) {
+      if (!list) return;
+      q = (q || '').toLowerCase().trim();
+      const years = Object.keys(tree).map(Number).sort((a,b) => b-a);
+      let html = '';
+
+      if (q) {
+        const matches = [];
+        years.forEach(y => {
+          Object.keys(tree[y]).map(Number).sort((a,b)=>a-b).forEach(m => {
+            Object.keys(tree[y][m]).map(Number).sort((a,b)=>a-b).forEach(d => {
+              [...tree[y][m][d]].sort((a,b)=>a-b).forEach(h => {
+                const label = `${y} › ${MONTHS[m]} › ${String(d).padStart(2,'0')} › ${String(h).padStart(2,'0')}:00`;
+                if (label.toLowerCase().includes(q)) matches.push({y,m,d,h,label});
+              });
+            });
+          });
+        });
+
+        if (!matches.length) { list.innerHTML = '<div class="ddt-empty">No matches</div>'; return; }
+
+        const matchKeys = matches.map(({y,m,d,h}) => lk(y,m,d,h));
+        html = `<div class="ddt-item">
+          <input type="checkbox" class="ddt-cb" id="sddt-sa">
+          <label for="sddt-sa" class="ddt-bold">Select All Results</label>
+          <span class="ddt-x" id="sddt-ca" title="Clear filter">✕</span>
+        </div><div class="ddt-sep"></div>` +
+          matches.map(({y,m,d,h,label}) => {
+            const k = lk(y,m,d,h);
+            return `<div class="ddt-item ddt-flat">
+              <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" data-d="${d}" data-h="${h}" id="sddt-r${k}">
+              <label for="sddt-r${k}" class="ddt-lbl">${label}</label>
+            </div>`;
+          }).join('');
+        list.innerHTML = html;
+        matches.forEach(({y,m,d,h}) => {
+          const cb = list.querySelector(`#sddt-r${lk(y,m,d,h)}`);
+          if (cb) { cb.checked = sigDatePending.has(lk(y,m,d,h)); cb.indeterminate = false; }
+        });
+        const saEl = list.querySelector('#sddt-sa');
+        setCb(saEl, pState(matchKeys));
+        list.querySelector('#sddt-ca')?.addEventListener('click', () => {
+          sigDatePending.clear();
+          list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => { cb.checked = false; cb.indeterminate = false; });
+          setCb(saEl, 'none');
+        });
+        saEl?.addEventListener('change', () => {
+          matchKeys.forEach(k => saEl.checked ? sigDatePending.add(k) : sigDatePending.delete(k));
+          list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+            cb.checked = sigDatePending.has(lk(+cb.dataset.y,+cb.dataset.m,+cb.dataset.d,+cb.dataset.h));
+          });
+          setCb(saEl, pState(matchKeys));
+        });
+        list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+          cb.addEventListener('change', () => {
+            const k = lk(+cb.dataset.y,+cb.dataset.m,+cb.dataset.d,+cb.dataset.h);
+            cb.checked ? sigDatePending.add(k) : sigDatePending.delete(k);
+            setCb(saEl, pState(matchKeys));
+          });
+        });
+        return;
+      }
+
+      // Tree mode
+      const allLeaves = leavesFor(null, null, null);
+      html = `<div class="ddt-item">
+        <input type="checkbox" class="ddt-cb" id="sddt-sa">
+        <label for="sddt-sa" class="ddt-bold">Select All</label>
+        <span class="ddt-x" id="sddt-ca" title="Clear filter">✕</span>
+      </div><div class="ddt-sep"></div>`;
+
+      years.forEach(y => {
+        const yId = `sddt-y${y}`;
+        const yOpen = ddtExp.has(yId);
+        html += `<div class="ddt-item">
+          <input type="checkbox" class="ddt-cb" data-y="${y}" id="scb-y${y}">
+          <span class="ddt-arr${yOpen?' open':''}" data-cid="${yId}">›</span>
+          <label for="scb-y${y}" class="ddt-lbl">${y}</label>
+        </div><div id="${yId}" class="ddt-ch"${yOpen?'':' style="display:none"'}>`;
+
+        Object.keys(tree[y]).map(Number).sort((a,b)=>a-b).forEach(m => {
+          const mId = `sddt-m${y}-${m}`;
+          const mOpen = ddtExp.has(mId);
+          html += `<div class="ddt-item">
+            <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" id="scb-m${y}-${m}">
+            <span class="ddt-arr${mOpen?' open':''}" data-cid="${mId}">›</span>
+            <label for="scb-m${y}-${m}" class="ddt-lbl">${MONTHS[m]}</label>
+          </div><div id="${mId}" class="ddt-ch"${mOpen?'':' style="display:none"'}>`;
+
+          Object.keys(tree[y][m]).map(Number).sort((a,b)=>a-b).forEach(d => {
+            const dId = `sddt-d${y}-${m}-${d}`;
+            const dOpen = ddtExp.has(dId);
+            html += `<div class="ddt-item">
+              <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" data-d="${d}" id="scb-d${y}-${m}-${d}">
+              <span class="ddt-arr${dOpen?' open':''}" data-cid="${dId}">›</span>
+              <label for="scb-d${y}-${m}-${d}" class="ddt-lbl">${String(d).padStart(2,'0')}</label>
+            </div><div id="${dId}" class="ddt-ch"${dOpen?'':' style="display:none"'}>`;
+
+            [...tree[y][m][d]].sort((a,b)=>a-b).forEach(h => {
+              html += `<div class="ddt-item">
+                <input type="checkbox" class="ddt-cb" data-y="${y}" data-m="${m}" data-d="${d}" data-h="${h}" id="scb-h${y}-${m}-${d}-${h}">
+                <label for="scb-h${y}-${m}-${d}-${h}" class="ddt-lbl">${String(h).padStart(2,'0')}:00</label>
+              </div>`;
+            });
+            html += `</div>`;
+          });
+          html += `</div>`;
+        });
+        html += `</div>`;
+      });
+
+      list.innerHTML = html;
+      updateCbStates();
+
+      list.querySelector('#sddt-ca')?.addEventListener('click', () => {
+        sigDatePending.clear();
+        updateCbStates();
+      });
+      list.querySelectorAll('.ddt-arr').forEach(arr => {
+        arr.addEventListener('click', e => {
+          e.preventDefault(); e.stopPropagation();
+          const cid = arr.dataset.cid;
+          const child = document.getElementById(cid);
+          if (!child) return;
+          const open = child.style.display !== 'none';
+          child.style.display = open ? 'none' : '';
+          arr.classList.toggle('open', !open);
+          open ? ddtExp.delete(cid) : ddtExp.add(cid);
+        });
+      });
+      list.querySelector('#sddt-sa')?.addEventListener('change', e => {
+        allLeaves.forEach(k => e.target.checked ? sigDatePending.add(k) : sigDatePending.delete(k));
+        updateCbStates();
+      });
+      list.querySelectorAll('input.ddt-cb[data-y]:not([data-m])').forEach(cb => {
+        cb.addEventListener('change', () => {
+          leavesFor(+cb.dataset.y, null, null)
+            .forEach(k => cb.checked ? sigDatePending.add(k) : sigDatePending.delete(k));
+          updateCbStates();
+        });
+      });
+      list.querySelectorAll('input.ddt-cb[data-m]:not([data-d])').forEach(cb => {
+        cb.addEventListener('change', () => {
+          leavesFor(+cb.dataset.y, +cb.dataset.m, null)
+            .forEach(k => cb.checked ? sigDatePending.add(k) : sigDatePending.delete(k));
+          updateCbStates();
+        });
+      });
+      list.querySelectorAll('input.ddt-cb[data-d]:not([data-h])').forEach(cb => {
+        cb.addEventListener('change', () => {
+          leavesFor(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d)
+            .forEach(k => cb.checked ? sigDatePending.add(k) : sigDatePending.delete(k));
+          updateCbStates();
+        });
+      });
+      list.querySelectorAll('input.ddt-cb[data-h]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const k = lk(+cb.dataset.y, +cb.dataset.m, +cb.dataset.d, +cb.dataset.h);
+          cb.checked ? sigDatePending.add(k) : sigDatePending.delete(k);
+          updateCbStates();
+        });
+      });
+    }
+
+    buildDdtTree('');
+    if (search) search.oninput = () => buildDdtTree(search.value);
+
+    // OK — commit pending and apply
+    if (selAllBtn) selAllBtn.onclick = () => {
+      sigDateChecked = new Set(sigDatePending);
+      sigPage = 1; renderSigTable(); closeSigColDd();
+    };
+    // Cancel — discard pending
+    if (clearBtn) clearBtn.onclick = () => closeSigColDd();
+    return;
+  }
+
+  // ── Generic checkbox filter for all other columns ───────────────────────
+  if (search)   { search.style.display = ''; search.placeholder = 'Search…'; }
+  if (selAllBtn) { selAllBtn.style.display = ''; selAllBtn.textContent = 'Select All'; }
+  if (clearBtn)  { clearBtn.textContent = 'Clear'; }
+  if (search)    { search.value = ''; }
+
+  const allVals = [...new Set(
+    sigAllSignals.map(s => String(sigColVal(s, col) ?? '').toLowerCase())
+      .filter(v => v !== '' && v !== '-infinity')
+  )].sort();
+
+  const currentSel = sigColFilters[col] || new Set();
+  sigColFilters[col] = currentSel;
+
+  function renderList(filter) {
+    const visible = filter ? allVals.filter(v => v.includes(filter.toLowerCase())) : allVals;
+    if (!list) return;
+    list.innerHTML = visible.map(v => `
+      <label class="col-dd-item">
+        <input type="checkbox" value="${esc(v)}" ${currentSel.has(v) ? 'checked' : ''}/>
+        <span>${esc(v)}</span>
+      </label>
+    `).join('');
+    list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        if (cb.checked) currentSel.add(cb.value);
+        else currentSel.delete(cb.value);
+        sigColFilters[col] = currentSel;
+        sigPage = 1;
+        renderSigTable();
+      });
+    });
+  }
+  renderList('');
+  if (search) {
+    search.oninput = () => renderList(search.value);
+    setTimeout(() => search.focus(), 50);
+  }
+
+  if (clearBtn) clearBtn.onclick = () => {
+    sigColFilters[col] = new Set();
+    closeSigColDd();
+    sigPage = 1;
+    renderSigTable();
+  };
+
+  if (selAllBtn) selAllBtn.onclick = () => {
+    allVals.forEach(v => currentSel.add(v));
+    sigColFilters[col] = currentSel;
+    sigPage = 1;
+    renderSigTable();
+    closeSigColDd();
+  };
+}
+
+function closeSigColDd() {
+  const dd = document.getElementById('sig-col-dd');
+  if (dd) dd.style.display = 'none';
+  sigColDdActiveCol = null;
+  _sigDdTh = null;
+}
+
+// Open signals dropdown when trigger button is clicked
+document.getElementById('sig-table')?.addEventListener('click', e => {
+  const btn = e.target.closest('.sig-col-dd-btn');
+  if (!btn) return;
+  e.stopPropagation();
+  openSigColDd(btn.dataset.col, btn);
+});
+
+// Close signals dropdown on outside click
+document.addEventListener('click', e => {
+  const dd = document.getElementById('sig-col-dd');
+  if (!dd || dd.style.display === 'none') return;
+  if (!dd.contains(e.target) && !e.target.closest('.sig-col-dd-btn')) {
+    closeSigColDd();
+  }
+});
+
+// Close signals dropdown on Escape (appended to existing keydown listener)
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeSigColDd();
+});
+
+// Clicking the th label also opens the signals dropdown
+document.querySelector('#sig-sort-row')?.addEventListener('click', e => {
+  if (e.target.closest('.sig-col-dd-btn')) return;
+  const th = e.target.closest('th[data-col]');
+  if (!th) return;
+  const btn = th.querySelector('.sig-col-dd-btn');
+  if (btn) openSigColDd(th.dataset.col, btn);
+});
 
 function renderPagination(containerId, page, pages, total, onNavigate) {
   const el = document.getElementById(containerId);
@@ -1275,9 +2139,12 @@ async function renderCosts() {
   setText('cost-gross', fmtUSD(summ.total_gross_pnl));
   setText('cost-total', fmtUSD(summ.total_cost));
   setText('cost-net',   fmtUSD(summ.total_net_pnl));
+  setText('cost-open',  fmtUSD(summ.open_entry_cost));
 
-  const rows = (data.rows || []).sort((a, b) =>
+  const allRows    = (data.rows || []).sort((a, b) =>
     (a.exit_time||'') < (b.exit_time||'') ? -1 : 1);
+  // Charts show only closed/partial rows (open entries have no realized P&L)
+  const rows = allRows.filter(r => r.type !== 'open entry');
 
   makeChart('cost-line-chart', {
     type: 'line',
@@ -1334,17 +2201,24 @@ async function renderCosts() {
 
   const tbody = document.querySelector('#cost-table tbody');
   if (tbody) {
-    if (!rows.length) {
+    if (!allRows.length) {
       tbody.innerHTML = `<tr><td colspan="6">${emptyState('No trades yet')}</td></tr>`;
     } else {
-      tbody.innerHTML = [...rows].reverse().map(r => `<tr>
-        <td style="white-space:nowrap;color:var(--text-sub)">${fmtTime(r.exit_time)}</td>
-        <td style="font-weight:600">${esc(r.symbol)}</td>
-        <td style="font-size:11px;color:var(--text-sub)">${esc(r.type)}</td>
-        <td class="${pnlClass(r.gross_pnl)}">${fmtUSD(r.gross_pnl)}</td>
-        <td style="color:var(--red)">${fmtUSD(r.estimated_cost)}</td>
-        <td class="${pnlClass(r.net_pnl)}">${fmtUSD(r.net_pnl)}</td>
-      </tr>`).join('');
+      tbody.innerHTML = [...allRows].reverse().map(r => {
+        const isOpen = r.type === 'open entry';
+        const rowStyle = isOpen ? ' style="opacity:0.7"' : '';
+        const timeLabel = isOpen
+          ? `<span style="font-size:9px;color:var(--amber);font-family:var(--sans);font-weight:700;letter-spacing:0.06em;text-transform:uppercase;margin-left:4px">OPEN</span>`
+          : '';
+        return `<tr${rowStyle}>
+          <td style="white-space:nowrap;color:var(--text-sub)">${fmtTime(r.exit_time)}${timeLabel}</td>
+          <td style="font-weight:600">${esc(r.symbol)}</td>
+          <td style="font-size:11px;color:var(--text-sub)">${esc(r.type)}</td>
+          <td class="${pnlClass(r.gross_pnl)}">${isOpen ? '—' : fmtUSD(r.gross_pnl)}</td>
+          <td style="color:var(--red)">${fmtUSD(r.estimated_cost)}</td>
+          <td class="${pnlClass(r.net_pnl)}">${fmtUSD(r.net_pnl)}</td>
+        </tr>`;
+      }).join('');
     }
   }
 }

@@ -199,10 +199,11 @@ def _broker_sync(force: bool = False) -> dict:
     if not force and _broker_cache["data"] and (now - _broker_cache["ts"]) < _BROKER_CACHE_TTL:
         return _broker_cache["data"]
     data = {
-        "oanda":     _fetch_oanda_live(),
-        "ibkr":      _fetch_ibkr_live(),
-        "synced_at": datetime.utcnow().isoformat() + "Z",
-        "ttl":       _BROKER_CACHE_TTL,
+        "oanda":        _fetch_oanda_live(),
+        "ibkr":         _fetch_ibkr_live(),
+        "synced_at":    datetime.utcnow().isoformat() + "Z",
+        "ttl":          _BROKER_CACHE_TTL,
+        "trading_mode": settings.bot.trading_mode,
     }
     _broker_cache["data"] = data
     _broker_cache["ts"]   = now
