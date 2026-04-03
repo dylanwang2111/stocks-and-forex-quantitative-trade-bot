@@ -148,7 +148,7 @@ class PortfolioBacktestRunner:
     CASH_RESERVE_PCT  = float(getattr(getattr(settings, "bot", None), "cash_reserve_pct", 0.30))
     TOTAL_CAPITAL     = float(getattr(getattr(settings, "bot", None), "total_capital", 2000.0))
 
-    def __init__(self, confidence_threshold: float = 55.0, holding_days: int = 3):
+    def __init__(self, confidence_threshold: float = 62.0, holding_days: int = 3):
         self.threshold    = confidence_threshold
         self.holding_days = holding_days
         self.scorer       = ConfidenceScorer()

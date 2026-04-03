@@ -1,96 +1,126 @@
 #!/usr/bin/env bash
-# manage.sh — start/stop/restart the trade bot and dashboard
 set -euo pipefail
+# manage.sh — bot & dashboard process manager
+# Usage:
+#   ./manage.sh start              — start bot + dashboard
+#   ./manage.sh start bot          — start bot only
+#   ./manage.sh start dashboard    — start dashboard only
+#   ./manage.sh stop               — stop bot + dashboard
+#   ./manage.sh stop bot           — stop bot only
+#   ./manage.sh stop dashboard     — stop dashboard only
+#   ./manage.sh restart            — restart bot + dashboard
+#   ./manage.sh restart bot        — restart bot only
+#   ./manage.sh restart dashboard  — restart dashboard only
+#   ./manage.sh status             — show running status + last 10 log lines
+#   ./manage.sh watchdog           — start bot if not running (for cron)
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="$SCRIPT_DIR/logs"
-DATE="$(date +%Y%m%d)"
-BOT_LOG="$LOG_DIR/paper_${DATE}.log"
-DASH_LOG="$LOG_DIR/dashboard_${DATE}.log"
+BOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_FILE="$BOT_DIR/logs/paper_$(date +%Y%m%d).log"
+DASH_LOG="$BOT_DIR/logs/dashboard_$(date +%Y%m%d).log"
+PIDFILE="$BOT_DIR/logs/bot.pid"
+DASH_PIDFILE="$BOT_DIR/logs/dashboard.pid"
 
-BOT_PATTERN="main.py --mode paper"
-DASH_PATTERN="uvicorn dashboard_v2:app"
+is_running() {
+    local pidfile="$1"
+    if [ -f "$pidfile" ]; then
+        local pid
+        pid=$(cat "$pidfile")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$pidfile"  # stale PID file — clean up
+    fi
+    return 1
+}
 
-_pids() { pgrep -f "$1" 2>/dev/null || true; }
+start_bot() {
+    if is_running "$PIDFILE"; then
+        echo "Bot already running (PID $(cat $PIDFILE))"
+        return
+    fi
+    cd "$BOT_DIR" || exit 1
+    nohup python main.py --mode paper >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    echo "Bot started (PID $!), logging to $LOG_FILE"
+}
 
-_stop() {
-    local label="$1" pattern="$2"
-    local pids
-    pids=$(_pids "$pattern")
-    if [ -n "$pids" ]; then
-        echo "$pids" | xargs kill
-        echo "Stopped $label (PIDs: $pids)"
+stop_bot() {
+    if is_running "$PIDFILE"; then
+        kill "$(cat $PIDFILE)" && rm -f "$PIDFILE"
+        echo "Bot stopped."
     else
-        echo "$label is not running"
+        echo "Bot not running."
     fi
 }
 
-_start_bot() {
-    if [ -n "$(_pids "$BOT_PATTERN")" ]; then
-        echo "Bot is already running"
+start_dashboard() {
+    if is_running "$DASH_PIDFILE"; then
+        echo "Dashboard already running (PID $(cat $DASH_PIDFILE))"
         return
     fi
-    nohup python "$SCRIPT_DIR/main.py" --mode paper >> "$BOT_LOG" 2>&1 &
-    echo "Bot started (PID $!) — logging to $BOT_LOG"
-}
-
-_start_dash() {
-    if [ -n "$(_pids "$DASH_PATTERN")" ]; then
-        echo "Dashboard is already running"
-        return
-    fi
+    cd "$BOT_DIR" || exit 1
     nohup uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 >> "$DASH_LOG" 2>&1 &
-    echo "Dashboard started (PID $!) — http://localhost:8050 — logging to $DASH_LOG"
+    echo $! > "$DASH_PIDFILE"
+    echo "Dashboard started (PID $!), logging to $DASH_LOG"
+    echo "Open http://localhost:8050"
 }
 
-_status() {
-    local bot_pids dash_pids
-    bot_pids=$(_pids "$BOT_PATTERN")
-    dash_pids=$(_pids "$DASH_PATTERN")
-    echo "Bot:       ${bot_pids:-not running}"
-    echo "Dashboard: ${dash_pids:-not running}"
+stop_dashboard() {
+    if is_running "$DASH_PIDFILE"; then
+        kill "$(cat $DASH_PIDFILE)" && rm -f "$DASH_PIDFILE"
+        echo "Dashboard stopped."
+    else
+        echo "Dashboard not running."
+    fi
 }
 
-cmd="${1:-help}"
-target="${2:-all}"   # all | bot | dashboard
-
-case "$cmd" in
-    start)
-        case "$target" in
-            all)       _start_bot; _start_dash ;;
-            bot)       _start_bot ;;
-            dashboard) _start_dash ;;
-            *) echo "Unknown target: $target"; exit 1 ;;
-        esac ;;
-    stop)
-        case "$target" in
-            all)       _stop "Bot" "$BOT_PATTERN"; _stop "Dashboard" "$DASH_PATTERN" ;;
-            bot)       _stop "Bot" "$BOT_PATTERN" ;;
-            dashboard) _stop "Dashboard" "$DASH_PATTERN" ;;
-            *) echo "Unknown target: $target"; exit 1 ;;
-        esac ;;
-    restart)
-        case "$target" in
-            all)
-                _stop "Bot" "$BOT_PATTERN"; _stop "Dashboard" "$DASH_PATTERN"
-                sleep 1
-                _start_bot; _start_dash ;;
-            bot)
-                _stop "Bot" "$BOT_PATTERN"; sleep 1; _start_bot ;;
-            dashboard)
-                _stop "Dashboard" "$DASH_PATTERN"; sleep 1; _start_dash ;;
-            *) echo "Unknown target: $target"; exit 1 ;;
-        esac ;;
-    status)
-        _status ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status} [all|bot|dashboard]"
-        echo ""
-        echo "  $0 start            # start bot + dashboard"
-        echo "  $0 stop             # stop  bot + dashboard"
-        echo "  $0 restart          # restart both"
-        echo "  $0 restart dashboard"
-        echo "  $0 restart bot"
-        echo "  $0 status"
-        ;;
+case "$1" in
+  start)
+    case "$2" in
+      bot)        start_bot ;;
+      dashboard)  start_dashboard ;;
+      "")         start_bot; start_dashboard ;;
+      *)          echo "Usage: $0 start [bot|dashboard]"; exit 1 ;;
+    esac
+    ;;
+  stop)
+    case "$2" in
+      bot)        stop_bot ;;
+      dashboard)  stop_dashboard ;;
+      "")         stop_bot; stop_dashboard ;;
+      *)          echo "Usage: $0 stop [bot|dashboard]"; exit 1 ;;
+    esac
+    ;;
+  restart)
+    case "$2" in
+      bot)        stop_bot;       sleep 1; start_bot ;;
+      dashboard)  stop_dashboard; sleep 1; start_dashboard ;;
+      "")         stop_bot; stop_dashboard; sleep 1; start_bot; start_dashboard ;;
+      *)          echo "Usage: $0 restart [bot|dashboard]"; exit 1 ;;
+    esac
+    ;;
+  status)
+    if is_running "$PIDFILE"; then
+        echo "Bot is RUNNING (PID $(cat $PIDFILE))"
+    else
+        echo "Bot is STOPPED"
+    fi
+    if is_running "$DASH_PIDFILE"; then
+        echo "Dashboard is RUNNING (PID $(cat $DASH_PIDFILE)) — http://localhost:8050"
+    else
+        echo "Dashboard is STOPPED"
+    fi
+    echo "--- Last 10 bot log lines ---"
+    tail -10 "$LOG_FILE" 2>/dev/null
+    ;;
+  watchdog)
+    if ! is_running "$PIDFILE"; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Bot not running — restarting..." >> "$BOT_DIR/logs/watchdog.log"
+        start_bot
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status|watchdog} [bot|dashboard]"
+    exit 1
+    ;;
 esac

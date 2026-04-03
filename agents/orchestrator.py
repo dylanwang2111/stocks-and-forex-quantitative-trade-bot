@@ -581,42 +581,39 @@ class Orchestrator:
             self._log_cycle_summary(cycle_start, skipped=False)
             return
 
-        # Notify Telegram of top signals (only on cycles that find something actionable)
-        try:
-            tg_results = [
-                {"symbol": r.symbol, "direction": getattr(r.confidence_result, "direction", "?"),
-                 "score": getattr(r.confidence_result, "score", 0)}
-                for r in scan_results
-                if hasattr(r, "confidence_result") and r.confidence_result is not None
-            ]
-            if tg_results:
-                self._notifier.notify_scan_result(tg_results)
-        except Exception:
-            pass  # never block trading loop for notification errors
-
         opportunities = self._scanner.tradeable_opportunities(scan_results)
+        tradeable_symbols = {o.symbol for o in opportunities}
+
+        # ── Step 6: Risk + order (fill all available slots) ────────────────────
         if not opportunities:
             logger.info(
                 "Cycle #%d: no tradeable opportunity found (all below threshold).",
                 self._cycle_count,
             )
-            self._log_cycle_summary(cycle_start, skipped=False)
-            return
+        else:
+            for opportunity in opportunities:
+                if not self._state.can_open_position(opportunity.symbol):
+                    logger.info(
+                        "Cycle #%d: capacity reached (open=%d, max=%d) — skipping %s.",
+                        self._cycle_count,
+                        len(self._state.all_positions()),
+                        self._state._max_positions,
+                        opportunity.symbol,
+                    )
+                    break
+                self._attempt_entry(opportunity)
 
-        # ── Step 6: Risk + order (fill all available slots) ────────────────────
-        for opportunity in opportunities:
-            if not self._state.can_open_position(opportunity.symbol):
-                logger.info(
-                    "Cycle #%d: capacity reached (open=%d, max=%d) — skipping %s.",
-                    self._cycle_count,
-                    len(self._state.all_positions()),
-                    self._state._max_positions,
-                    opportunity.symbol,
-                )
-                break
-            self._attempt_entry(opportunity)
-
-        # ── Step 7: Summary ────────────────────────────────────────────────────
+        # ── Step 7: Telegram cycle digest + summary ────────────────────────────
+        try:
+            self._notifier.notify_cycle_summary(
+                cycle=self._cycle_count,
+                scan_results=scan_results,
+                tradeable_symbols=tradeable_symbols,
+                open_count=len(self._state.all_positions()),
+                daily_pnl=self._state.daily_pnl(),
+            )
+        except Exception:
+            pass  # never block trading loop for notification errors
         self._log_cycle_summary(cycle_start, skipped=False)
 
     def save_snapshot(self) -> None:
@@ -1059,6 +1056,11 @@ class Orchestrator:
             )
             return
 
+        # ── Guard 2.5: stop_loss cooldown (24h) ───────────────────────────────
+        if self._is_in_stop_cooldown(symbol):
+            logger.info("_attempt_entry: %s in stop_loss cooldown (24h) — skip.", symbol)
+            return
+
         # ── Guard 3: event blackout ────────────────────────────────────────────
         try:
             from portfolio.watchlist import get_instrument
@@ -1220,6 +1222,29 @@ class Orchestrator:
                 symbol=symbol,
                 metadata={"direction": direction, "broker": result.broker},
             )
+
+    _STOP_COOLDOWN_HOURS = 24
+
+    def _is_in_stop_cooldown(self, symbol: str) -> bool:
+        """Return True if symbol hit a stop_loss within the last 24h."""
+        try:
+            session = get_session(self._database_url)
+            last = (
+                session.query(Trade)
+                .filter(
+                    Trade.symbol == symbol,
+                    Trade.status == "closed",
+                    Trade.notes == "stop_loss",
+                )
+                .order_by(Trade.exit_time.desc())
+                .first()
+            )
+            if last is None or last.exit_time is None:
+                return False
+            age = datetime.utcnow() - last.exit_time
+            return age.total_seconds() < self._STOP_COOLDOWN_HOURS * 3600
+        except Exception:
+            return False  # fail open — never silently block on DB error
 
     def _get_current_price(self, symbol: str) -> float | None:
         """

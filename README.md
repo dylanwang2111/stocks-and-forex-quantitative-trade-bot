@@ -21,6 +21,46 @@ Automated trading bot for a $2,000 account. Scans 40 instruments every 15 minute
 
 ---
 
+## Architecture
+
+**[→ Interactive Architecture Diagram](docs/architecture.html)** — LangGraph-style multi-agent flowchart with all agents, data flows, APIs, guards, and execution paths. Open in a browser.
+
+```
+Schedulers (APScheduler)
+  ├── Every 15 min ──────────────────────────── Orchestrator
+  ├── Mon 00:00 UTC ──── PortfolioAgent ──┐
+  └── Daily 05:00 UTC ── PreScreenAgent ──┴─→ UNIVERSE (9–12 instruments)
+                                                    │
+                                           ┌────────▼────────┐
+                                           │  ORCHESTRATOR   │
+                                           │  CircuitBreaker │
+                                           │  HealthMonitor  │
+                                           └────────┬────────┘
+                                                    │
+                              ┌─────────────────────▼──────────────────────┐
+                              │              DataFetcher (15-min cache)     │
+                              │        OANDA ── IBKR ── yfinance            │
+                              └─────────────────────┬──────────────────────┘
+                                                    │
+                              ┌─────────────────────▼──────────────────────┐
+                              │  RegimeDetector → SignalEngine (8 cats)     │
+                              │  cat8: Gemini LLM  →  ConfidenceScorer     │
+                              └─────────────────────┬──────────────────────┘
+                                                    │
+                              CorrelationGuard · EventGuard · PDTTracker
+                                                    │
+                              ┌─────────────────────▼──────────────────────┐
+                              │   RiskAgent (ATR sizing) → ExecutionAgent  │
+                              │        IBKR (stocks)  /  OANDA (forex)     │
+                              └─────────────────────┬──────────────────────┘
+                                                    │
+                              SQLite DB · PortfolioStateManager
+                                                    │
+                              Telegram Alerts · FastAPI Dashboard (:8050)
+```
+
+---
+
 ## Quick Start
 
 ```bash

@@ -103,7 +103,7 @@ class BacktestRunner:
 
     def __init__(
         self,
-        confidence_threshold: float = 55.0,
+        confidence_threshold: float = 62.0,
         holding_days: int = 7,
         atr_sl_mult: float = 2.0,
         atr_tp_mult: float = 4.0,

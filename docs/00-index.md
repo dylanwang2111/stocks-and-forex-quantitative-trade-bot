@@ -8,6 +8,7 @@ Complete reference for the Trade Signet automated trading platform.
 
 | # | Document | Description |
 |---|----------|-------------|
+| 00 | [**Architecture Diagram**](architecture.html) | Interactive LangGraph-style multi-agent flowchart (open in browser) |
 | 01 | [Architecture Overview](01-architecture.md) | System design, component map, data flow |
 | 02 | [Configuration](02-configuration.md) | Environment variables, settings, capital model |
 | 03 | [Signal System](03-signals.md) | All 8 signal categories, scoring, position tiers |

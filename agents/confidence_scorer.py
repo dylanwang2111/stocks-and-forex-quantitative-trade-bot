@@ -81,7 +81,7 @@ class ConfidenceScorer:
     # Minimum lead gap between bull and bear (in 0–100 points)
     MIN_LEAD_GAP = 10.0
 
-    # Confidence thresholds — calibrated to match backtest entry at 55
+    # Confidence thresholds — tier sizing boundaries (entry floor enforced separately via MIN_CONFIDENCE)
     THRESHOLDS = [
         (80, PositionTier.FULL),
         (70, PositionTier.LARGE),
@@ -182,7 +182,7 @@ class ConfidenceScorer:
     def simple_signal(
         self,
         votes: dict[str, int],
-        threshold: float = 55.0,
+        threshold: float = 62.0,
     ) -> tuple[int, float]:
         """
         Lightweight scoring for backtesting (no regime context).

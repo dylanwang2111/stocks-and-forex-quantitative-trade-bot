@@ -32,6 +32,7 @@ from agents.signal_engine import SignalBundle, SignalEngine
 from data.fetcher import fetch_candles
 from database.models import SignalLog, get_session
 from events.event_guard import EventGuard
+from config.settings import settings
 from portfolio.pdt_tracker import PDTTracker
 from portfolio.state import PortfolioStateManager
 from portfolio.watchlist import get_universe_snapshot, Instrument
@@ -59,6 +60,8 @@ class ScanResult:
     atr: Optional[float] = None          # ATR(14) from 1h data — for adaptive stops
     ema50: Optional[float] = None        # EMA50 from 1h data — short-term trend filter
     current_price: Optional[float] = None  # cached close price from 1h data
+    volume_ratio: Optional[float] = None   # current vol / 20-bar avg vol — stock entry gate
+    ema50_1d: Optional[float] = None       # EMA50 from 1d data — daily trend alignment filter
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +199,16 @@ class Scanner:
         Shared filter: unblocked + tradeable tier + EMA50(1h) trend confirmation.
         Returns list sorted by dominant_score DESC.
         """
+        min_score = settings.bot.min_confidence
         candidates: list[ScanResult] = []
         for r in results:
             if r.blocked or not r.confidence_result.tradeable():
+                continue
+            if r.confidence_result.dominant_score < min_score:
+                logger.debug(
+                    "_filter_tradeable: %s skipped — score %.1f < min_confidence %.1f",
+                    r.symbol, r.confidence_result.dominant_score, min_score,
+                )
                 continue
             direction = r.confidence_result.direction
             # EMA50(1h) trend filter: long only above EMA50, short only below
@@ -215,6 +225,27 @@ class Scanner:
                         r.symbol, r.current_price, r.ema50,
                     )
                     continue
+            # EMA50(1d) daily trend alignment: long only above, short only below
+            if r.ema50_1d is not None and r.current_price is not None:
+                if direction == "long" and r.current_price < r.ema50_1d:
+                    logger.debug(
+                        "_filter_tradeable: %s skipped — price %.4f below EMA50(1d) %.4f",
+                        r.symbol, r.current_price, r.ema50_1d,
+                    )
+                    continue
+                if direction == "short" and r.current_price > r.ema50_1d:
+                    logger.debug(
+                        "_filter_tradeable: %s skipped — price %.4f above EMA50(1d) %.4f",
+                        r.symbol, r.current_price, r.ema50_1d,
+                    )
+                    continue
+            # Volume confirmation for stocks: require above-average volume on entry
+            if r.volume_ratio is not None and r.volume_ratio < 1.0:
+                logger.debug(
+                    "_filter_tradeable: %s skipped — volume_ratio=%.2f below 1.0",
+                    r.symbol, r.volume_ratio,
+                )
+                continue
             candidates.append(r)
         candidates.sort(key=lambda r: r.confidence_result.dominant_score, reverse=True)
         return candidates
@@ -256,6 +287,12 @@ class Scanner:
                 )
                 return None  # cannot proceed without data
 
+        # Fetch 1d data separately (optional — fail open if unavailable)
+        try:
+            dfs["1d"] = fetch_candles(symbol, "1d")
+        except Exception:
+            logger.debug("scan: failed to fetch %s [1d] — proceeding without", symbol)
+
         # Validate we actually got data
         if not dfs or any(df.empty for df in dfs.values()):
             logger.warning("scan: empty data for %s — skipping", symbol)
@@ -288,6 +325,29 @@ class Scanner:
                     ema50_val = float(ema50_s.iloc[-1])
         except Exception:
             logger.debug("scan: ATR/EMA50 fetch failed for %s — proceeding without", symbol, exc_info=True)
+
+        # Volume ratio (stocks only): current vol / 20-bar avg — for entry gate
+        volume_ratio_val: Optional[float] = None
+        if instrument.asset_type == "stock":
+            try:
+                df_1h = dfs.get("1h")
+                if df_1h is not None and "volume" in df_1h.columns and len(df_1h) >= 20:
+                    vol_ma = float(df_1h["volume"].rolling(20).mean().iloc[-1])
+                    if vol_ma > 0:
+                        volume_ratio_val = float(df_1h["volume"].iloc[-1]) / vol_ma
+            except Exception:
+                logger.debug("scan: volume_ratio failed for %s", symbol)
+
+        # EMA50(1d): daily trend alignment — fails open if 1d data unavailable
+        ema50_1d_val: Optional[float] = None
+        try:
+            df_1d = dfs.get("1d")
+            if df_1d is not None and len(df_1d) >= 30:
+                ema50_1d_s = ta.ema(df_1d["close"], length=50)
+                if ema50_1d_s is not None and not ema50_1d_s.empty and pd.notna(ema50_1d_s.iloc[-1]):
+                    ema50_1d_val = float(ema50_1d_s.iloc[-1])
+        except Exception:
+            logger.debug("scan: EMA50(1d) failed for %s", symbol)
 
         # Step 5: Signal engine
         try:
@@ -386,6 +446,8 @@ class Scanner:
             atr=atr_val,
             ema50=ema50_val,
             current_price=current_price_val,
+            volume_ratio=volume_ratio_val,
+            ema50_1d=ema50_1d_val,
         )
 
     # ------------------------------------------------------------------

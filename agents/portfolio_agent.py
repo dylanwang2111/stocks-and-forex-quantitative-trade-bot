@@ -136,7 +136,7 @@ class PortfolioAgent:
     MAX_FOREX: int   = settings.bot.max_forex
     MAX_CRYPTO: int  = settings.bot.max_crypto
     MIN_BARS: int    = 20
-    MAX_PER_SECTOR: int = 3   # max stocks from any single sector
+    MAX_PER_SECTOR: int = 2   # max stocks from any single sector
 
     def _bulk_fetch(self) -> dict[str, pd.DataFrame]:
         result = self._bulk_fetch_yfinance()
@@ -725,11 +725,13 @@ def _run_scoring_unit_test() -> None:
     neutral_macro = MacroContext(vix=15.0, oil_uptrend=False, gold_uptrend=False)
     fear_macro    = MacroContext(vix=28.0, oil_uptrend=True,  gold_uptrend=True)
 
-    # ── Test 1: gate blocks downtrend ─────────────────────────────────────
+    # ── Test 1: downtrend scores as short candidate (ALLOW_SHORT_STOCKS=True) ─
+    # With shorts enabled, a bear-stack downtrend passes the gate and scores > 0.
+    # The gate still blocks flat/choppy markets (no clear EMA alignment).
     down_df = _make_df(trend=-0.005)
     score = agent._score_instrument(test_stock, neutral_macro, df=down_df)
-    assert score is None, f"Downtrend should be blocked by gate, got score={score}"
-    print("PASS: gate blocks downtrend")
+    assert score is not None and score > 0, f"Downtrend should score > 0 as short candidate, got {score}"
+    print(f"PASS: downtrend scores as short candidate (score={score:.2f})")
 
     # ── Test 2: uptrend passes gate and scores > 0 ────────────────────────
     up_df = _make_df(trend=0.003)

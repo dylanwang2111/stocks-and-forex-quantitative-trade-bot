@@ -196,17 +196,61 @@ class TelegramNotifier:
         self.send(msg)
 
     def notify_scan_result(self, results: list[dict]) -> None:
+        """Legacy — kept for compatibility. Prefer notify_cycle_summary."""
+        pass
+
+    def notify_cycle_summary(
+        self,
+        cycle: int,
+        scan_results: list,
+        tradeable_symbols: set[str],
+        open_count: int,
+        daily_pnl: float,
+    ) -> None:
         """
-        results: list of dicts with keys: symbol, direction, score
-        Only shows top signals (score >= 55).
+        Send a per-cycle digest showing top signals, open positions, and P&L.
+
+        scan_results: list of ScanResult objects
+        tradeable_symbols: set of symbols that passed all entry filters
         """
-        tradeable = [r for r in results if r.get("score", 0) >= 55]
-        if not tradeable:
-            return
-        lines = ["📡 SCAN RESULT"]
-        for r in sorted(tradeable, key=lambda x: x["score"], reverse=True)[:5]:
-            arrow = "▲" if r.get("direction") == "long" else "▼"
-            lines.append(f"  {r['symbol']:<8} {arrow} {r['score']:.0f}%")
+        min_score = settings.bot.min_confidence
+        now = datetime.utcnow().strftime("%H:%M UTC")
+        pnl_sign = "+" if daily_pnl >= 0 else ""
+        header = (
+            f"📡 Cycle #{cycle}  {now}\n"
+            f"Open: {open_count}  |  Daily P&L: {pnl_sign}${daily_pnl:.2f}"
+        )
+
+        # Collect all scored results sorted by dominant_score
+        scored = []
+        for r in scan_results:
+            cr = getattr(r, "confidence_result", None)
+            if cr is None:
+                continue
+            score = getattr(cr, "dominant_score", 0.0)
+            direction = getattr(cr, "direction", "?")
+            tier = getattr(cr, "position_tier", None)
+            tier_name = tier.name if tier is not None else "?"
+            blocked = getattr(r, "blocked", False)
+            scored.append((score, r.symbol, direction, tier_name, blocked))
+        scored.sort(reverse=True)
+
+        if not scored:
+            return  # nothing to report
+
+        lines = [header, ""]
+        for score, symbol, direction, tier, blocked in scored[:8]:
+            arrow = "▲" if direction == "long" else "▼"
+            if blocked:
+                status = "🔒"
+            elif score < min_score:
+                status = "⬇"
+            elif symbol in tradeable_symbols:
+                status = "✅"
+            else:
+                status = "⛔"   # above floor but filtered (volume/EMA50)
+            lines.append(f"{status} {symbol:<8} {arrow} {score:>5.1f}  {tier}")
+
         self.send("\n".join(lines))
 
     def notify_optimizer_ready(self, approved: int, rejected: int) -> None:

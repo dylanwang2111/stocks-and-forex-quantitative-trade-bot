@@ -26,7 +26,15 @@
       "Bash(echo \"=== RUFF ===\" && ruff check agents/ --output-format=concise 2>&1\necho \"=== BANDIT ===\" && bandit -r agents/ -ll 2>&1\necho \"=== MYPY ===\" && mypy agents/ --ignore-missing-imports --no-error-summary 2>&1)",
       "Bash(conda install:*)",
       "Bash(curl -v \"http://localhost:5001/api/trades?page_size=1\")",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(pkill -f \"main.py --mode paper\")",
+      "Bash(pkill -f \"uvicorn dashboard_v2\")",
+      "Bash(./manage.sh stop:*)",
+      "Bash(./manage.sh start:*)",
+      "Bash(./manage.sh status:*)",
+      "Bash(find /home/dylannguyen/trade-bot-test -type f -name \"*.py\" -exec grep -l \"USD\\\\|usd\\\\|\\\\$\" {} \\\\;)",
+      "Bash(grep -rn \"'\\\\$'\\\\|\\\\\"\\\\$\\\\\"\\\\|\\\\\\\\$\" /home/dylannguyen/trade-bot-test/static/)",
+      "Bash(pkill -f dashboard_v2.py)"
     ]
   }
 }

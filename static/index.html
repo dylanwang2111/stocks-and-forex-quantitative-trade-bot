@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=16" />
+  <link rel="stylesheet" href="/static/style.css?v=20" />
   <style>
     /* Table horizontal scroll — inline to bypass CSS caching */
     .ov-bottom-grid > * { min-width: 0 !important; }
@@ -87,6 +87,12 @@
       <span class="upd-time" id="last-update">—</span>
       <div class="pulse-dot" id="pulse-dot"></div>
     </div>
+    <!-- Hamburger (mobile only) -->
+    <button class="nav-toggle" id="nav-toggle" aria-label="Open navigation" aria-expanded="false">
+      <span class="nav-toggle-bar"></span>
+      <span class="nav-toggle-bar"></span>
+      <span class="nav-toggle-bar"></span>
+    </button>
     <!-- Settings -->
     <div class="settings-wrap">
       <button class="settings-btn" id="settings-btn" title="Settings" aria-label="Settings">
@@ -111,6 +117,7 @@
     </div>
   </div>
 </header>
+<div class="nav-backdrop" id="nav-backdrop"></div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 <!-- CONTENT                                                                     -->
@@ -122,6 +129,20 @@
     <div class="page-header">
       <h1>Overview</h1>
       <div class="sub" id="ov-snapshot-time">Loading…</div>
+    </div>
+
+    <!-- Broker sync status bar -->
+    <div class="broker-sync-bar" id="broker-sync-bar" style="display:none">
+      <div class="bsb-pills">
+        <span class="bsb-pill" id="bsb-oanda">
+          <span class="bsb-dot"></span>OANDA <span class="bsb-val" id="bsb-oanda-val">—</span>
+        </span>
+        <span class="bsb-pill" id="bsb-ibkr">
+          <span class="bsb-dot"></span>IBKR <span class="bsb-val" id="bsb-ibkr-val">—</span>
+        </span>
+        <span class="bsb-time" id="bsb-synced-at"></span>
+      </div>
+      <button class="bsb-sync-btn" id="bsb-sync-btn" title="Refresh broker data">⟳ Sync</button>
     </div>
 
     <div class="metrics-row" id="ov-metrics">
@@ -344,19 +365,26 @@
 
     <div class="card" style="padding:0; overflow:hidden;">
       <div class="table-wrap">
-        <table class="dt" id="sig-table">
-          <thead><tr>
-            <th>Time</th><th>Symbol</th><th>Dir</th>
-            <th data-tip="Trend Direction">C1</th>
-            <th data-tip="Trend Strength">C2</th>
-            <th data-tip="Momentum">C3</th>
-            <th data-tip="Volatility Band">C4</th>
-            <th data-tip="Volume OBV">C5</th>
-            <th data-tip="Price Structure">C6</th>
-            <th data-tip="Multi-Timeframe (±2)">C7</th>
-            <th data-tip="Macro / News">C8</th>
-            <th>Score</th><th>Tier</th><th>Regime</th><th>Macro Risk</th>
-          </tr></thead>
+        <table class="dt sortable" id="sig-table">
+          <thead>
+            <tr id="sig-sort-row">
+              <th data-col="timestamp"><div class="th-inner"><span>Time</span><button class="sig-col-dd-btn" data-col="timestamp" tabindex="-1">⌄</button></div></th>
+              <th data-col="symbol"><div class="th-inner"><span>Symbol</span><button class="sig-col-dd-btn" data-col="symbol" tabindex="-1">⌄</button></div></th>
+              <th data-col="direction"><div class="th-inner"><span>Dir</span><button class="sig-col-dd-btn" data-col="direction" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Trend Direction" data-col="c1"><div class="th-inner"><span>C1</span><button class="sig-col-dd-btn" data-col="c1" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Trend Strength" data-col="c2"><div class="th-inner"><span>C2</span><button class="sig-col-dd-btn" data-col="c2" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Momentum" data-col="c3"><div class="th-inner"><span>C3</span><button class="sig-col-dd-btn" data-col="c3" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Volatility Band" data-col="c4"><div class="th-inner"><span>C4</span><button class="sig-col-dd-btn" data-col="c4" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Volume OBV" data-col="c5"><div class="th-inner"><span>C5</span><button class="sig-col-dd-btn" data-col="c5" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Price Structure" data-col="c6"><div class="th-inner"><span>C6</span><button class="sig-col-dd-btn" data-col="c6" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Multi-Timeframe (±2)" data-col="c7"><div class="th-inner"><span>C7</span><button class="sig-col-dd-btn" data-col="c7" tabindex="-1">⌄</button></div></th>
+              <th data-tip="Macro / News" data-col="c8"><div class="th-inner"><span>C8</span><button class="sig-col-dd-btn" data-col="c8" tabindex="-1">⌄</button></div></th>
+              <th data-col="score"><div class="th-inner"><span>Score</span><button class="sig-col-dd-btn" data-col="score" tabindex="-1">⌄</button></div></th>
+              <th data-col="tier"><div class="th-inner"><span>Tier</span><button class="sig-col-dd-btn" data-col="tier" tabindex="-1">⌄</button></div></th>
+              <th data-col="regime"><div class="th-inner"><span>Regime</span><button class="sig-col-dd-btn" data-col="regime" tabindex="-1">⌄</button></div></th>
+              <th data-col="macro_risk"><div class="th-inner"><span>Macro Risk</span><button class="sig-col-dd-btn" data-col="macro_risk" tabindex="-1">⌄</button></div></th>
+            </tr>
+          </thead>
           <tbody></tbody>
         </table>
       </div>
@@ -447,13 +475,18 @@
         <div class="m-value" id="cost-gross">—</div>
       </div>
       <div class="metric-card accent-red">
-        <div class="m-label">Total Costs</div>
+        <div class="m-label">Realized Costs</div>
         <div class="m-value" id="cost-total">—</div>
-        <div class="m-delta" style="font-size:10px">stock 0.15% · forex 0.08%</div>
+        <div class="m-delta" style="font-size:10px">stock 0.07% · forex 0.028% · crypto 0.07%</div>
       </div>
       <div class="metric-card accent-green">
         <div class="m-label">Net P&amp;L</div>
         <div class="m-value" id="cost-net">—</div>
+      </div>
+      <div class="metric-card accent-amber">
+        <div class="m-label">Open Entry Costs</div>
+        <div class="m-value" id="cost-open">—</div>
+        <div class="m-delta" style="font-size:10px">entry fees already paid</div>
       </div>
     </div>
 
@@ -667,7 +700,21 @@
     <button class="col-dd-footer-btn col-dd-selectall" id="col-dd-selectall">Select All</button>
   </div>
 </div>
+<!-- Signals column filter dropdown -->
+<div id="sig-col-dd" class="col-dd" style="display:none">
+  <div class="col-dd-sorts">
+    <button class="sig-col-dd-sort-btn" data-dir="asc" title="Sort ascending">↑ Asc</button>
+    <button class="sig-col-dd-sort-btn" data-dir="desc" title="Sort descending">↓ Desc</button>
+  </div>
+  <div class="col-dd-divider"></div>
+  <input class="col-dd-search" id="sig-col-dd-search" placeholder="Search…" autocomplete="off"/>
+  <div class="col-dd-list" id="sig-col-dd-list"></div>
+  <div class="col-dd-footer">
+    <button class="col-dd-footer-btn" id="sig-col-dd-clear">Clear</button>
+    <button class="col-dd-footer-btn col-dd-selectall" id="sig-col-dd-selectall">Select All</button>
+  </div>
+</div>
 
-<script src="/static/app.js?v=13"></script>
+<script src="/static/app.js?v=17"></script>
 </body>
 </html>
