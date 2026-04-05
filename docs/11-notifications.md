@@ -54,9 +54,9 @@ P&L:  +$18.97  (+4.13%)
 
 ```
 ❌ TRADE CLOSED  [stop_loss]
-EURUSD  SHORT
-Entry → Exit:  $1.1501 → $1.1519
-P&L:  -$0.07  (-0.16%)
+BTCUSD  SHORT
+Entry → Exit:  $82500.00 → $83200.00
+P&L:  -$7.00  (-0.85%)
 ```
 
 Exit reasons: `stop_loss`, `take_profit`, `signal_exit`, `time_exit`.
@@ -94,7 +94,7 @@ Fired after each weekly or daily universe selection.
 ```
 🔄 PORTFOLIO UPDATED
 Stocks (6): CVX, VLO, GLD, JNJ, WMT, COST
-Forex  (2): USDJPY, USDCHF
+Crypto (2): BTCUSD, ETHUSD
 ```
 
 ---
@@ -146,7 +146,7 @@ Fired after each scan cycle when there are tradeable signals (score ≥ 55).
 ```
 📡 SCAN RESULT
   NVDA     ▲ 72%
-  EURUSD   ▼ 66%
+  BTCUSD   ▼ 66%
   CVX      ▲ 58%
 ```
 

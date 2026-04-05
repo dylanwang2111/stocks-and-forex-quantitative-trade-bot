@@ -85,28 +85,6 @@ UNIVERSE: list[Instrument] = [
                active_hours_utc="13:30–20:00", slippage_pct=0.0008, min_position_usd=10.0,
                notes="Barrick Gold. World's largest gold miner."),
     Instrument(
-        symbol="EURUSD",
-        broker="oanda",
-        asset_type="forex",
-        yf_symbol="EURUSD=X",
-        active_hours_utc="00:00–22:00",   # 24/5, avoid thin Asia session
-        slippage_pct=0.0002,              # ~0.2 pip on 1.1000 price
-        min_position_usd=10.0,
-        correlated_with=["GBPUSD"],
-        notes="Primary intraday instrument. No PDT restriction. 24/5 trading.",
-    ),
-    Instrument(
-        symbol="GBPUSD",
-        broker="oanda",
-        asset_type="forex",
-        yf_symbol="GBPUSD=X",
-        active_hours_utc="07:00–20:00",   # London + overlap session
-        slippage_pct=0.0003,
-        min_position_usd=10.0,
-        correlated_with=["EURUSD"],
-        notes="Secondary forex. Strong trends only. Never hold with EURUSD.",
-    ),
-    Instrument(
         symbol="BTCUSD",
         broker="oanda",
         asset_type="crypto",
@@ -250,28 +228,6 @@ CANDIDATE_POOL: list[Instrument] = [
     Instrument(symbol="CAT",  broker="ibkr", asset_type="stock", yf_symbol="CAT",
                active_hours_utc="13:30–20:00", slippage_pct=0.0008, min_position_usd=10.0,
                correlated_with=[], notes="Caterpillar. Infrastructure / commodities proxy."),
-    # ── Forex ───────────────────────────────────────────────────────────────────
-    Instrument(symbol="EURUSD", broker="oanda", asset_type="forex", yf_symbol="EURUSD=X",
-               active_hours_utc="00:00–22:00", slippage_pct=0.0002, min_position_usd=10.0,
-               correlated_with=["GBPUSD"], notes="EUR/USD. Primary forex. No PDT."),
-    Instrument(symbol="GBPUSD", broker="oanda", asset_type="forex", yf_symbol="GBPUSD=X",
-               active_hours_utc="07:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
-               correlated_with=["EURUSD"], notes="GBP/USD. London session."),
-    Instrument(symbol="USDJPY", broker="oanda", asset_type="forex", yf_symbol="JPY=X",
-               active_hours_utc="00:00–22:00", slippage_pct=0.0002, min_position_usd=10.0,
-               correlated_with=[], notes="USD/JPY. Safe haven proxy. Note: yfinance returns JPY per USD."),
-    Instrument(symbol="AUDUSD", broker="oanda", asset_type="forex", yf_symbol="AUDUSD=X",
-               active_hours_utc="22:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
-               correlated_with=["NZDUSD"], notes="AUD/USD. Commodity-linked currency."),
-    Instrument(symbol="USDCAD", broker="oanda", asset_type="forex", yf_symbol="CAD=X",
-               active_hours_utc="13:00–21:00", slippage_pct=0.0003, min_position_usd=10.0,
-               correlated_with=[], notes="USD/CAD. Oil-linked currency."),
-    Instrument(symbol="USDCHF", broker="oanda", asset_type="forex", yf_symbol="CHF=X",
-               active_hours_utc="07:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
-               correlated_with=[], notes="USD/CHF. Safe haven. European session."),
-    Instrument(symbol="NZDUSD", broker="oanda", asset_type="forex", yf_symbol="NZDUSD=X",
-               active_hours_utc="22:00–20:00", slippage_pct=0.0003, min_position_usd=10.0,
-               correlated_with=["AUDUSD"], notes="NZD/USD. Commodity-linked currency. Lower corr than AUDUSD."),
     # ── Crypto ──────────────────────────────────────────────────────────────────
     Instrument(symbol="BTCUSD", broker="oanda", asset_type="crypto", yf_symbol="BTC-USD",
                active_hours_utc="00:00–23:59", slippage_pct=0.001, min_position_usd=10.0,
@@ -293,7 +249,6 @@ CANDIDATE_POOL_BY_SYMBOL: dict[str, Instrument] = {i.symbol: i for i in CANDIDAT
 CORRELATION_BLACKLIST: list[frozenset[str]] = [
     frozenset({"SPY", "QQQ"}),
     frozenset({"QQQ", "NVDA"}),
-    frozenset({"EURUSD", "GBPUSD"}),
 ]
 
 

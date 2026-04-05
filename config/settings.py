@@ -107,9 +107,6 @@ class BotConfig:
     max_stocks: int = field(
         default_factory=lambda: int(os.getenv("MAX_STOCKS", "6"))
     )
-    max_forex: int = field(
-        default_factory=lambda: int(os.getenv("MAX_FOREX", "2"))
-    )
     max_crypto: int = field(
         default_factory=lambda: int(os.getenv("MAX_CRYPTO", "1"))
     )

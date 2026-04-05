@@ -95,7 +95,7 @@ Circuit breaker resets at midnight UTC (new trading day). All open positions con
 
 ## PortfolioAgent (`agents/portfolio_agent.py`)
 
-Runs **weekly on Monday 00:00 UTC**. Scores all 45 instruments in the CANDIDATE_POOL and selects the best 4 stocks + 4 forex + 2 crypto for the active trading universe.
+Runs **weekly on Monday 00:00 UTC**. Scores all instruments in the CANDIDATE_POOL and selects the best 4 stocks + 2 crypto for the active trading universe.
 
 ### Data Used
 - **60-day daily OHLCV** (yfinance bulk fetch → IBKR fallback)
@@ -117,7 +117,7 @@ For each symbol in CANDIDATE_POOL (45 instruments):
      total = technical + fundamental + macro
 
 Sort stocks by total DESC, apply sector cap (max 2 per sector)
-Select top 4 stocks + top 4 forex + top 2 crypto (BTC force-included as anchor)
+Select top 4 stocks + top 2 crypto (BTC force-included as anchor)
 Call set_active_universe(selected)
 Send Telegram: notify_portfolio_updated()
 ```
@@ -190,10 +190,9 @@ Runs **daily at 05:00 UTC (Tue–Sun)**. Lighter version of PortfolioAgent using
 | Schedule | Mon 00:00 UTC | Tue–Sun 05:00 UTC |
 | Data lookback | 60 days | 30 days |
 | EMA gate (stocks) | EMA9 > EMA21 > EMA50 | EMA9 > EMA21 only |
-| EMA gate (forex) | EMA9 > EMA21 | EMA9 > EMA21 |
 | Max stocks | 8 | 4 |
-| Max forex | 2 | 2 |
-| EURUSD | Selected on merit | Force-included as anchor |
+| Max crypto | 2 | 2 |
+| BTCUSD | Selected on merit | Force-included as anchor |
 | Stock selection | Sector-capped greedy | Correlation-aware greedy |
 
 ### Purpose
@@ -220,23 +219,7 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
    # SMALL=0.25, MEDIUM=0.50, LARGE=0.75, FULL=1.00
 
 5. Apply volatility/macro multiplier:
-   - **Stocks / Crypto**: LLM-derived from Cat8 risk_level  (HIGH=0.5×, MEDIUM=0.75×, LOW=1.0×)
-   - **Forex**: pair-specific vol multiplier (see table below) — LLM multiplier is NOT used
-
-   Forex vol multiplier:
-   - EUR pairs (EURUSD, EURGBP, …): based on EVZ (CBOE Euro Vol Index), refreshed hourly
-     | EVZ          | Multiplier |
-     |--------------|------------|
-     | ≥ 8.5        | 0.50×      |
-     | 6.5 – 8.5    | 0.75×      |
-     | < 6.5        | 1.00×      |
-   - Other forex pairs: based on pair's own 1h ATR%
-     | ATR%         | Multiplier |
-     |--------------|------------|
-     | > 0.8%       | 0.50×      |
-     | 0.5% – 0.8%  | 0.75×      |
-     | < 0.5%       | 1.00×      |
-   - Data unavailable (fetch error): conservative fallback → 0.75×
+   - LLM-derived from Cat8 risk_level  (HIGH=0.5×, MEDIUM=0.75×, LOW=1.0×)
 
 6. ATR volatility scaling (if ATR available):
    atr_pct = atr / entry_price
@@ -247,10 +230,7 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 7. Clamp to available_cash(broker) — never exceed what's free
 
 8. quantity = position_usd / entry_price
-   → Stocks: round to 4 decimal places (fractional shares)
-   → Forex (non-USD-base, e.g. EURUSD, GBPUSD): round to nearest integer (OANDA units)
-   → Forex (USD-base, e.g. USDJPY, USDCHF, USDCAD): quantity = position_usd directly
-     (1 OANDA unit of a USD-base pair = 1 USD of base, so no price division)
+   → Stocks / Crypto: round to 4 decimal places (fractional shares)
 
 9. Compute stops and take-profits:
    ATR-based (preferred):
@@ -258,23 +238,16 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
      Long TP    = entry + ATR_TP_MULT × atr
      Short stop = entry + ATR_SL_MULT × atr
      Short TP   = entry - ATR_TP_MULT × atr
-   Forex minimum stop floor:
-     sl_dist = max(sl_dist, entry × 0.4%)   — prevents stops too tight for hourly noise
    Fixed % (fallback when ATR unavailable):
      stop = entry ± 1.5%
      tp   = entry ± 3.0%   (2:1 reward-to-risk)
 
-10. risk_dollars:
-    - Stocks / non-USD-base forex: |entry - stop| × quantity
-    - USD-base forex (USDJPY, USDCHF, USDCAD): (|entry - stop| / entry) × quantity
-      ⚠️ For USD-base pairs, stop distance is in the quote currency (JPY, CHF, CAD).
-      Dividing by entry_price converts it to USD before multiplying by quantity (in USD units).
+10. risk_dollars = |entry - stop| × quantity
 
 11. Risk cap enforcement:
     max_risk = broker_cap × RISK_PER_TRADE  (1%)
     if risk_dollars > max_risk:
-        USD-base forex: capped_qty = max_risk / (|entry - stop| / entry)
-        all others:     capped_qty = max_risk / |entry - stop|
+        capped_qty = max_risk / |entry - stop|
         quantity = floor(capped_qty)
         recompute position_usd, risk_dollars
 ```
@@ -286,12 +259,9 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 | Asset Type | SL Multiplier |
 |------------|---------------|
 | Stock | 2.0× ATR |
-| Forex | 3.0× ATR |
 | Crypto | 2.0× ATR |
 
-**Take-profit** multipliers scale with position tier. Forex uses larger multiples because its ATR% (~0.05–0.10% per 1h bar) is ~10–20× smaller than stocks (0.5–2%):
-
-**Stocks / Crypto:**
+**Take-profit** multipliers scale with position tier:
 
 | Position Tier | TP Multiplier |
 |---------------|---------------|
@@ -299,19 +269,6 @@ Converts a `ConfidenceResult` + current price into concrete position sizing para
 | MEDIUM | 5.0× ATR |
 | LARGE  | 6.0× ATR |
 | FULL   | 6.5× ATR |
-
-**Forex:**
-
-| Position Tier | TP Multiplier |
-|---------------|---------------|
-| SMALL  | 10.0× ATR |
-| MEDIUM | 12.0× ATR |
-| LARGE  | 14.0× ATR |
-| FULL   | 15.0× ATR |
-
-**Forex size multiplier**: `_FOREX_SIZE_MULT = 1.5×` is applied before EVZ/ATR vol reduction to compensate for forex's small pip moves.
-
-**Forex minimum stop**: `entry × 0.4%` floor prevents stops that are too tight to survive normal 1h noise (e.g. < 63 pips USDJPY).
 
 ### RiskParams Output
 
@@ -343,7 +300,7 @@ place_order(symbol, risk_params, direction, ...)
   │     ├── paper: synthetic fill at entry_price
   │     └── live:  limit order + bracket (stop + TP) via ib_insync
   │
-  └── asset_type == "forex"  →  _place_oanda_order()
+  └── asset_type == "crypto"  →  _place_oanda_order()
         ├── paper: synthetic fill at entry_price
         └── live:  market order with SL/TP via oandapyV20
 ```

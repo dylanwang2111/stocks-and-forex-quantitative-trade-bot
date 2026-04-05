@@ -591,8 +591,8 @@ def test_scanner() -> None:
     # ── Instrument fixtures ─────────────────────────────────────────────────────
 
     from portfolio.watchlist import get_instrument
-    spy = get_instrument("SPY")          # active_hours_utc = "13:30–20:00"
-    eurusd = get_instrument("EURUSD")    # active_hours_utc = "00:00–22:00"
+    spy    = get_instrument("SPY")       # active_hours_utc = "13:30–20:00"
+    btcusd = get_instrument("BTCUSD")    # active_hours_utc = "00:00–23:59"
 
     # ── Test 1 & 2: _is_market_open for stock ──────────────────────────────────
 
@@ -620,8 +620,8 @@ def test_scanner() -> None:
     saturday_14 = datetime(2026, 3, 7, 14, 0, 0)  # 2026-03-07 is a Saturday
     with mock.patch(_patch_target) as mock_dt:
         mock_dt.utcnow.return_value = saturday_14
-        result_weekend = scanner._is_market_open(eurusd)
-    check("EURUSD at 14:00 UTC Saturday → closed (weekend)", result_weekend, False)
+        result_weekend = scanner._is_market_open(btcusd)
+    check("BTCUSD at 14:00 UTC Saturday → closed (weekend)", result_weekend, False)
 
     # ── Test 4: top_opportunity ─────────────────────────────────────────────────
 
@@ -669,10 +669,10 @@ def test_scanner() -> None:
         block_reason="",
     )
     unblocked_high = ScanResult(
-        symbol="EURUSD",
+        symbol="BTCUSD",
         confidence_result=_make_confidence(82.0, True),
         regime=_make_regime(),
-        bundle=_make_bundle("EURUSD"),
+        bundle=_make_bundle("BTCUSD"),
         blocked=False,
         block_reason="",
     )
@@ -690,7 +690,7 @@ def test_scanner() -> None:
     if best is None:
         failures.append("FAIL [top_opportunity returns result]: got None")
     else:
-        check("top_opportunity returns EURUSD (highest unblocked score)", best.symbol, "EURUSD")
+        check("top_opportunity returns BTCUSD (highest unblocked score)", best.symbol, "BTCUSD")
         check("top_opportunity score is 82.0", best.confidence_result.dominant_score, 82.0)
 
     # Edge: all blocked → None

@@ -19,7 +19,7 @@ Both engines use **daily bars** as a proxy for the live 15-minute signal engine.
 ## CLI: validate.py
 
 ```bash
-# Validate all default instruments (SPY, QQQ, NVDA, AAPL, EURUSD, GBPUSD)
+# Validate all default instruments (SPY, QQQ, NVDA, AAPL, BTCUSD, ETHUSD)
 python validate.py
 
 # Single symbol
@@ -38,7 +38,7 @@ python validate.py --portfolio --walkforward
 python validate.py --start 2020-01-01 --end 2025-03-01
 
 # Custom symbol set
-python validate.py --symbols SPY,QQQ,EURUSD
+python validate.py --symbols SPY,QQQ,BTCUSD
 ```
 
 ### Pass Thresholds
@@ -57,7 +57,7 @@ Symbol     Sharpe   WinRate    MaxDD      PF  Trades    Return   Status
 SPY          1.45    62.3%    11.2%    1.82      34     18.4%   PASS ✓
 QQQ          1.38    58.7%    14.1%    1.71      29     15.2%   PASS ✓
 NVDA         1.61    64.1%    17.8%    2.04      41     31.7%   PASS ✓
-EURUSD       1.22    55.2%    9.3%     1.54      38      8.1%   PASS ✓
+BTCUSD       1.22    55.2%    9.3%     1.54      38      8.1%   PASS ✓
 ```
 
 ---
@@ -84,8 +84,8 @@ The live signals are adapted for daily bars:
 ### Position Management
 
 - Entry: Score ≥ MIN_CONFIDENCE (55) and direction agreement
-- Stop-loss: 2× ATR (stocks) or 1.5× ATR (forex)
-- Take-profit: tier-based — stocks: SMALL 4×, MEDIUM 5×, LARGE 6×, FULL 6.5×; forex: SMALL 8×, MEDIUM 10×, LARGE 12×, FULL 13× (higher because forex 1h ATR% is ~10–20× smaller)
+- Stop-loss: 2× ATR (stocks/crypto)
+- Take-profit: tier-based — SMALL 4×, MEDIUM 5×, LARGE 6×, FULL 6.5× ATR
 - Max holding: `SWING_HOLDING_DAYS` calendar days (default 7)
 
 ### Short Selling
@@ -118,8 +118,8 @@ Track:
 
 ### Features
 
-- **ATR-based stops**: Same multipliers as live — stocks: 2× SL / 4× TP; forex: 1.5× SL / 10× TP (portfolio backtest uses the MEDIUM tier as a flat default)
-- **Correlation guards**: Energy cluster, gold cluster, forex limit
+- **ATR-based stops**: Same multipliers as live — stocks/crypto: 2× SL / 5× TP (MEDIUM tier default)
+- **Correlation guards**: Energy cluster, gold cluster, crypto correlation
 - **Sector caps**: Max 2 instruments per sector in backtest universe
 - **Short selling**: When EMA50 < EMA200 (bear regime)
 - **Slippage**: Applied at configurable rate (default 0.1%)

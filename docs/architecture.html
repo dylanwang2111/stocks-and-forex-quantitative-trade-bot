@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Signet Trading Bot — Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+html,body{
+  background:#020508;height:100vh;overflow:hidden;
+  display:flex;flex-direction:column;
+  -webkit-font-smoothing:antialiased;
+}
+.hdr{
+  flex-shrink:0;height:50px;
+  padding:0 28px;
+  background:#050a0f;
+  border-bottom:1px solid #1a2840;
+  display:flex;align-items:center;gap:14px;
+  position:relative;
+}
+.hdr::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,#00c4b4 20%,#ffc400 50%,#7c4dff 80%,transparent);
+  opacity:.65;
+}
+.logo{
+  width:32px;height:32px;
+  background:linear-gradient(135deg,#003838,#006060);
+  border-radius:8px;display:grid;place-items:center;flex-shrink:0;
+  box-shadow:0 3px 10px rgba(0,196,180,.25);
+}
+.title{font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#e4ecf8;letter-spacing:-.02em;}
+.title em{color:#00e5cc;font-style:normal;}
+.subtitle{font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#3a5060;letter-spacing:.04em;}
+.pill{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;
+  padding:3px 9px;border-radius:20px;background:rgba(0,196,180,.08);border:1px solid rgba(0,196,180,.2);
+  color:#00c4b4;letter-spacing:.08em;}
+svg#arch{flex:1;display:block;width:100%;}
+.leg{
+  flex-shrink:0;height:32px;padding:0 24px;
+  border-top:1px solid #1a2840;background:#050a0f;
+  display:flex;flex-wrap:nowrap;gap:18px;align-items:center;overflow:hidden;
+}
+.leg-t{font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;color:#3a5060;
+  text-transform:uppercase;letter-spacing:.1em;white-space:nowrap;}
+.leg-i{display:flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;
+  font-size:9px;color:#5a7090;white-space:nowrap;}
+.leg-d{width:9px;height:9px;border-radius:2px;flex-shrink:0;}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div class="logo">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#00e5cc" stroke-width="2.3" stroke-linecap="round">
+      <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>
+    </svg>
+  </div>
+  <div>
+    <div class="title">Signet <em>Trading Bot</em> — Multi-Agent Architecture</div>
+    <div class="subtitle">Automated trading · IBKR + OANDA · Stocks · Forex · Crypto · v1.2.0</div>
+  </div>
+  <div class="pill">PAPER MODE</div>
+</div>
+
+<svg id="arch" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<div class="leg">
+  <span class="leg-t">Legend</span>
+  <span class="leg-i"><span class="leg-d" style="background:#001818;border:1px solid #00c4b4"></span>Schedulers</span>
+  <span class="leg-i"><span class="leg-d" style="background:#000f28;border:1px solid #2979ff"></span>Universe</span>
+  <span class="leg-i"><span class="leg-d" style="background:#120e00;border:1px solid #e6ac00"></span>Orchestrator</span>
+  <span class="leg-i"><span class="leg-d" style="background:#130020;border:1px solid #9c27b0"></span>Data Pipeline</span>
+  <span class="leg-i"><span class="leg-d" style="background:#180a00;border:1px solid #e65c00"></span>Signal Pipeline</span>
+  <span class="leg-i"><span class="leg-d" style="background:#180010;border:1px solid #e00050"></span>Guards</span>
+  <span class="leg-i"><span class="leg-d" style="background:#001a0d;border:1px solid #00b44a"></span>Execution</span>
+  <span class="leg-i"><span class="leg-d" style="background:#0e1520;border:1px solid #507080"></span>Persistence</span>
+  <span class="leg-i"><span class="leg-d" style="background:#001818;border:1px solid #007080"></span>Outputs</span>
+  <span class="leg-i" style="margin-left:6px">
+    <svg width="26" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#4a6a80" stroke-width="1.4" stroke-dasharray="4,2"/><polygon points="18,1.5 26,4 18,6.5" fill="#4a6a80"/></svg>
+    Data Flow
+  </span>
+</div>
+
+<script>
+/* ── NODES ── */
+const N = {
+  // 01 Schedulers
+  sched_scan:    {x:92,   y:104, w:142, h:42, g:'sched',   icon:'⏱', label:'15-min Scan',      sub:'scan_and_trade()'},
+  sched_weekly:  {x:258,  y:104, w:155, h:42, g:'sched',   icon:'📅', label:'Mon 00:00 UTC',    sub:'Portfolio selection'},
+  sched_daily:   {x:435,  y:104, w:152, h:42, g:'sched',   icon:'🌅', label:'Daily 05:00 UTC',  sub:'Pre-screen refresh'},
+  // 02 Universe
+  portfolio:     {x:652,  y:97,  w:172, h:42, g:'univ',    icon:'📊', label:'PortfolioAgent',   sub:'45 cands · 60d bars'},
+  universe:      {x:858,  y:104, w:145, h:56, g:'univ',    icon:'🌐', label:'UNIVERSE',         sub:'9–12 instruments', primary:true},
+  prescreen:     {x:1065, y:97,  w:172, h:42, g:'univ',    icon:'🔍', label:'PreScreenAgent',   sub:'Daily · 30d bars'},
+  // 03 Orchestrator
+  orch:          {x:778,  y:224, w:820, h:56, g:'orch',    icon:'⚡', label:'ORCHESTRATOR',     sub:'CircuitBreaker 3%/5-loss  ·  HealthMonitor  ·  Check exits → Gate → Scan → Fill slots → Notify', primary:true},
+  // 04 Data Pipeline
+  fetcher:       {x:1060, y:360, w:175, h:48, g:'data',    icon:'📡', label:'DataFetcher',      sub:'5m·15m·1h·1d · 15-min cache', primary:true},
+  oanda_api:     {x:910,  y:448, w:145, h:40, g:'data',    icon:'💱', label:'OANDA API',        sub:'Forex + Crypto'},
+  ibkr_api:      {x:1072, y:448, w:145, h:40, g:'data',    icon:'📈', label:'IBKR API',         sub:'Stocks · port 4002'},
+  yf_api:        {x:1234, y:448, w:145, h:40, g:'data',    icon:'📉', label:'yfinance',         sub:'Fallback · ^VIX · GLD'},
+  // 05 Signal Pipeline
+  regime:        {x:840,  y:536, w:168, h:40, g:'signal',  icon:'🎛', label:'RegimeDetector',   sub:'ADX · EMA · ATR · BB'},
+  gemini:        {x:1058, y:524, w:162, h:40, g:'signal',  icon:'🤖', label:'Gemini LLM',       sub:'cat8 · sentiment · 60m $'},
+  signal_eng:    {x:840,  y:588, w:168, h:40, g:'signal',  icon:'📶', label:'SignalEngine',     sub:'cat1–8 · 3 timeframes'},
+  confidence:    {x:840,  y:641, w:178, h:40, g:'signal',  icon:'🎯', label:'ConfidenceScorer', sub:'0–100 · SM/MD/LG/FULL'},
+  // 06 Guards
+  corr_guard:    {x:1292, y:536, w:166, h:40, g:'guard',   icon:'🔗', label:'CorrelationGuard', sub:'Corr pairs · MAX_FOREX:3'},
+  event_guard:   {x:1292, y:588, w:158, h:40, g:'guard',   icon:'📅', label:'EventGuard',       sub:'Earnings · FOMC'},
+  pdt_guard:     {x:1292, y:641, w:150, h:40, g:'guard',   icon:'⚖',  label:'PDTTracker',       sub:'≤3 trades / 5 days'},
+  // 07 Execution
+  risk_agent:    {x:900,  y:736, w:155, h:42, g:'exec',    icon:'🛡', label:'RiskAgent',        sub:'ATR stops · vol sizing'},
+  exec_agent:    {x:1100, y:736, w:165, h:42, g:'exec',    icon:'⚙',  label:'ExecutionAgent',   sub:'IBKR stocks / OANDA fx'},
+  ibkr_broker:   {x:1012, y:798, w:145, h:38, g:'exec',    icon:'🏛', label:'IBKR',             sub:'Stocks · paper 4002'},
+  oanda_broker:  {x:1210, y:798, w:153, h:38, g:'exec',    icon:'💹', label:'OANDA',            sub:'Forex + Crypto'},
+  // 08 Persistence
+  sqlite:        {x:130,  y:715, w:155, h:46, g:'persist', icon:'🗄', label:'SQLite DB',        sub:'trade_bot.db · 6 tables'},
+  state_mgr:     {x:332,  y:715, w:192, h:46, g:'persist', icon:'💾', label:'StateManager',     sub:'Positions · PnL · capital'},
+  // 09 Outputs
+  telegram:      {x:130,  y:810, w:162, h:40, g:'output',  icon:'📱', label:'Telegram',         sub:'Trade alerts · hourly'},
+  dashboard:     {x:355,  y:810, w:158, h:40, g:'output',  icon:'📊', label:'Dashboard',        sub:'FastAPI · port 8050'},
+};
+
+/* ── GROUP PANELS ── */
+const GROUPS = [
+  {label:'01 · SCHEDULERS',           x:26,  y:50,  w:534, h:106, g:'sched' },
+  {label:'02 · UNIVERSE MANAGEMENT',  x:585, y:50,  w:570, h:106, g:'univ'  },
+  {label:'04 · DATA PIPELINE',        x:790, y:324, w:620, h:184, g:'data'  },
+  {label:'05 · SIGNAL PIPELINE',      x:756, y:500, w:512, h:204, g:'signal'},
+  {label:'06 · GUARDS',               x:1208,y:500, w:308, h:204, g:'guard' },
+  {label:'07 · EXECUTION',            x:790, y:702, w:600, h:152, g:'exec'  },
+  {label:'08 · PERSISTENCE & STATE',  x:26,  y:685, w:540, h:100, g:'persist'},
+  {label:'09 · OUTPUTS & MONITORING', x:26,  y:788, w:540, h:78,  g:'output'},
+];
+
+/* ── COLORS ── */
+const C = {
+  sched:   {fill:'#001818',stroke:'#00c4b4',text:'#4dcfc8',accent:'#00e5cc'},
+  univ:    {fill:'#000f28',stroke:'#2979ff',text:'#7eb4ff',accent:'#5599ff'},
+  orch:    {fill:'#120e00',stroke:'#e6ac00',text:'#ffe08a',accent:'#ffc400'},
+  data:    {fill:'#130020',stroke:'#9c27b0',text:'#ce93d8',accent:'#ba68c8'},
+  signal:  {fill:'#180a00',stroke:'#e65c00',text:'#ffab66',accent:'#ff7c2a'},
+  guard:   {fill:'#180010',stroke:'#e00050',text:'#f48fb1',accent:'#ff4d72'},
+  exec:    {fill:'#001a0d',stroke:'#00b44a',text:'#6de89a',accent:'#00e676'},
+  persist: {fill:'#0e1520',stroke:'#507080',text:'#8aaabb',accent:'#78909c'},
+  output:  {fill:'#001818',stroke:'#007080',text:'#4dcfe0',accent:'#00acc1'},
+};
+
+const EC = {
+  teal:   {stroke:'#00c4b4',glow:'rgba(0,196,180,.12)'},
+  blue:   {stroke:'#2979ff',glow:'rgba(41,121,255,.12)'},
+  gold:   {stroke:'#e6ac00',glow:'rgba(230,172,0,.15)'},
+  purple: {stroke:'#9c27b0',glow:'rgba(156,39,176,.12)'},
+  orange: {stroke:'#e65c00',glow:'rgba(230,92,0,.12)'},
+  pink:   {stroke:'#cc2090',glow:'rgba(204,32,144,.12)'},
+  red:    {stroke:'#cc2244',glow:'rgba(204,34,68,.12)'},
+  green:  {stroke:'#00b44a',glow:'rgba(0,180,74,.12)'},
+  silver: {stroke:'#607080',glow:'rgba(96,112,128,.10)'},
+  cyan:   {stroke:'#007080',glow:'rgba(0,112,128,.10)'},
+};
+
+/* ── EDGES ── */
+const EDGES = [
+  // Schedulers → Universe agents
+  {f:'sched_scan',   fs:'right',  t:'portfolio',   ts:'left',   c:'teal',   lbl:''},
+  {f:'sched_weekly', fs:'right',  t:'portfolio',   ts:'left',   c:'teal',   lbl:''},
+  {f:'sched_daily',  fs:'right',  t:'prescreen',   ts:'left',   c:'teal',   lbl:''},
+  // Universe ↔ hub
+  {f:'portfolio',    fs:'right',  t:'universe',    ts:'left',   c:'blue',   lbl:''},
+  {f:'prescreen',    fs:'left',   t:'universe',    ts:'right',  c:'blue',   lbl:''},
+  // UNIVERSE → Orchestrator
+  {f:'universe',     fs:'bottom', t:'orch',        ts:'top',    c:'gold',   lbl:'active universe'},
+  // Orchestrator → DataFetcher
+  {f:'orch',         fs:'right',  t:'fetcher',     ts:'top',    c:'purple', lbl:'fetch data'},
+  // DataFetcher → APIs
+  {f:'fetcher',      fs:'bottom', t:'oanda_api',   ts:'top',    c:'purple', lbl:''},
+  {f:'fetcher',      fs:'bottom', t:'ibkr_api',    ts:'top',    c:'purple', lbl:''},
+  {f:'fetcher',      fs:'bottom', t:'yf_api',      ts:'top',    c:'purple', lbl:''},
+  // DataFetcher → Signal Pipeline
+  {f:'fetcher',      fs:'bottom', t:'regime',      ts:'top',    c:'orange', lbl:'OHLCV'},
+  // Signal flow
+  {f:'regime',       fs:'bottom', t:'signal_eng',  ts:'top',    c:'orange', lbl:''},
+  {f:'gemini',       fs:'bottom', t:'signal_eng',  ts:'right',  c:'pink',   lbl:'cat8'},
+  {f:'signal_eng',   fs:'bottom', t:'confidence',  ts:'top',    c:'orange', lbl:''},
+  // Confidence → Guards
+  {f:'confidence',   fs:'right',  t:'corr_guard',  ts:'left',   c:'red',    lbl:'confidence'},
+  {f:'confidence',   fs:'right',  t:'event_guard', ts:'left',   c:'red',    lbl:''},
+  {f:'confidence',   fs:'right',  t:'pdt_guard',   ts:'left',   c:'red',    lbl:''},
+  // Guards → RiskAgent
+  {f:'corr_guard',   fs:'bottom', t:'risk_agent',  ts:'top',    c:'green',  lbl:''},
+  {f:'event_guard',  fs:'bottom', t:'risk_agent',  ts:'top',    c:'green',  lbl:''},
+  {f:'pdt_guard',    fs:'bottom', t:'risk_agent',  ts:'top',    c:'green',  lbl:''},
+  // Risk → Exec → Brokers
+  {f:'risk_agent',   fs:'right',  t:'exec_agent',  ts:'left',   c:'green',  lbl:'approved'},
+  {f:'exec_agent',   fs:'bottom', t:'ibkr_broker', ts:'top',    c:'green',  lbl:''},
+  {f:'exec_agent',   fs:'bottom', t:'oanda_broker',ts:'top',    c:'green',  lbl:''},
+  // Exec → Persistence
+  {f:'exec_agent',   fs:'left',   t:'state_mgr',   ts:'right',  c:'silver', lbl:'persist fill'},
+  {f:'state_mgr',    fs:'left',   t:'sqlite',      ts:'right',  c:'silver', lbl:''},
+  // StateManager → Orchestrator (feedback)
+  {f:'state_mgr',    fs:'top',    t:'orch',        ts:'left',   c:'silver', lbl:'exit checks'},
+  // Orchestrator → Outputs
+  {f:'orch',         fs:'left',   t:'telegram',    ts:'top',    c:'cyan',   lbl:'notify'},
+];
+
+/* ── PORT HELPER ── */
+function port(id, side) {
+  const n = N[id];
+  if(side==='top')    return [n.x,         n.y - n.h/2];
+  if(side==='bottom') return [n.x,         n.y + n.h/2];
+  if(side==='left')   return [n.x - n.w/2, n.y];
+  if(side==='right')  return [n.x + n.w/2, n.y];
+}
+
+/* ── BEZIER PATH ── */
+function bz(x1,y1,x2,y2,fs,ts){
+  const dx=Math.abs(x2-x1), dy=Math.abs(y2-y1);
+  const t=Math.min(Math.max(dx,dy)*0.45, 90);
+  let cx1=x1,cy1=y1,cx2=x2,cy2=y2;
+  if(fs==='bottom'&&ts==='top')    {cy1=y1+t;cx1=x1;cy2=y2-t;cx2=x2;}
+  else if(fs==='top'&&ts==='bottom'){cy1=y1-t;cx1=x1;cy2=y2+t;cx2=x2;}
+  else if(fs==='right'&&ts==='left'){cx1=x1+t;cy1=y1;cx2=x2-t;cy2=y2;}
+  else if(fs==='left'&&ts==='right'){cx1=x1-t;cy1=y1;cx2=x2+t;cy2=y2;}
+  else if(fs==='bottom'&&ts==='left') {cx1=x1;cy1=y2;cx2=x2-t*.6;cy2=y2;}
+  else if(fs==='bottom'&&ts==='right'){cx1=x1;cy1=y2;cx2=x2+t*.6;cy2=y2;}
+  else if(fs==='right'&&ts==='top')  {cx1=x1+t;cy1=y1;cx2=x2;cy2=y2-t;}
+  else if(fs==='left'&&ts==='top')   {cx1=x1-t;cy1=y1;cx2=x2;cy2=y2-t;}
+  else if(fs==='top'&&ts==='left')   {cx1=x1;cy1=y1-t;cx2=x2-t;cy2=y2;}
+  else if(fs==='top'&&ts==='right')  {cx1=x1;cy1=y1-t;cx2=x2+t;cy2=y2;}
+  else {const mx=(x1+x2)/2;cx1=mx;cy1=y1;cx2=mx;cy2=y2;}
+  return `M ${x1.toFixed(1)} ${y1.toFixed(1)} C ${cx1.toFixed(1)} ${cy1.toFixed(1)} ${cx2.toFixed(1)} ${cy2.toFixed(1)} ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+}
+
+/* ── SVG HELPERS ── */
+const NS='http://www.w3.org/2000/svg';
+function el(tag,attrs={}){const e=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);return e;}
+function txt(s,attrs={}){const e=el('text',attrs);e.textContent=s;return e;}
+
+/* ── RENDER ── */
+window.addEventListener('load',()=>{
+  const svg=document.getElementById('arch');
+
+  /* DEFS */
+  const defs=el('defs');
+
+  // Arrow markers
+  for(const[name,cfg] of Object.entries(EC)){
+    const m=el('marker',{id:'arr-'+name,markerWidth:'8',markerHeight:'8',refX:'7',refY:'3',orient:'auto',markerUnits:'strokeWidth'});
+    m.appendChild(el('path',{d:'M0,0 L0,6 L8,3 z',fill:cfg.stroke}));
+    defs.appendChild(m);
+  }
+
+  // Glow filter
+  const filt=el('filter',{id:'glow',x:'-30%',y:'-30%',width:'160%',height:'160%'});
+  const blur=el('feGaussianBlur',{stdDeviation:'4',result:'b',in:'SourceGraphic'});
+  const comp=el('feComposite',{in:'SourceGraphic',in2:'b',operator:'over'});
+  filt.appendChild(blur);filt.appendChild(comp);
+  defs.appendChild(filt);
+
+  // Animation styles
+  const style=el('style');
+  style.textContent=`
+    @keyframes flow{to{stroke-dashoffset:-16}}
+    .ea{stroke-dasharray:5 4;animation:flow 1.4s linear infinite}
+    .es{stroke-dasharray:4 5;opacity:.35}
+    .ef{stroke-dasharray:5 4;animation:flow .9s linear infinite}
+  `;
+  defs.appendChild(style);
+
+  // Dot grid pattern
+  const pat=el('pattern',{id:'dots',x:'0',y:'0',width:'22',height:'22',patternUnits:'userSpaceOnUse'});
+  pat.appendChild(el('circle',{cx:'1',cy:'1',r:'.9',fill:'rgba(255,255,255,0.04)'}));
+  defs.appendChild(pat);
+
+  svg.appendChild(defs);
+
+  /* BG */
+  svg.appendChild(el('rect',{width:'1600',height:'900',fill:'#050a10'}));
+  svg.appendChild(el('rect',{width:'1600',height:'900',fill:'url(#dots)'}));
+
+  /* GROUP PANELS */
+  for(const g of GROUPS){
+    const col=C[g.g]||C.persist;
+    const grp=el('g',{opacity:'.88'});
+    grp.appendChild(el('rect',{x:g.x,y:g.y,width:g.w,height:g.h,rx:'10',
+      fill:col.fill,stroke:col.stroke,'stroke-width':'1','stroke-dasharray':'4 3',opacity:'.65'}));
+    grp.appendChild(txt(g.label,{x:g.x+10,y:g.y-5,
+      'font-family':'JetBrains Mono,monospace','font-size':'8.5','font-weight':'700',
+      fill:col.accent,opacity:'.8','letter-spacing':'.12em'}));
+    svg.appendChild(grp);
+  }
+
+  /* EDGES */
+  const eLayer=el('g');
+  for(const e of EDGES){
+    const [x1,y1]=port(e.f,e.fs);
+    const [x2,y2]=port(e.t,e.ts);
+    const col=EC[e.c]||EC.silver;
+    const d=bz(x1,y1,x2,y2,e.fs,e.ts);
+    const isFast=e.c==='teal'||e.c==='gold'||e.c==='green';
+    const isStatic=e.c==='silver'||e.c==='cyan';
+
+    // glow
+    eLayer.appendChild(el('path',{d,fill:'none',stroke:col.glow,'stroke-width':'7','stroke-linecap':'round'}));
+    // main
+    eLayer.appendChild(el('path',{d,fill:'none',stroke:col.stroke,
+      'stroke-width': isStatic?'1.4':'1.8','stroke-linecap':'round',
+      'marker-end':`url(#arr-${e.c})`,
+      class: isStatic?'es': isFast?'ef':'ea',
+      opacity: isStatic?'.5':'.88'}));
+
+    if(e.lbl){
+      const mx=(x1+x2)/2, my=(y1+y2)/2-7;
+      const tw=e.lbl.length*5.5+10;
+      eLayer.appendChild(el('rect',{x:mx-tw/2,y:my-10,width:tw,height:13,rx:'3',fill:'#060c14',opacity:'.9'}));
+      eLayer.appendChild(txt(e.lbl,{x:mx,y:my,
+        'text-anchor':'middle','dominant-baseline':'middle',
+        'font-family':'JetBrains Mono,monospace','font-size':'8.5','font-weight':'500',
+        fill:col.stroke,opacity:'.9'}));
+    }
+  }
+  svg.appendChild(eLayer);
+
+  /* NODES */
+  const nLayer=el('g');
+  for(const[id,n] of Object.entries(N)){
+    const col=C[n.g]||C.persist;
+    const grp=el('g',{id:'n-'+id,style:'cursor:default'});
+    const nx=n.x-n.w/2, ny=n.y-n.h/2;
+
+    // outer glow for primary
+    if(n.primary){
+      grp.appendChild(el('rect',{x:nx-2,y:ny-2,width:n.w+4,height:n.h+4,rx:'11',
+        fill:'none',stroke:col.accent,'stroke-width':'1',opacity:'.3',filter:'url(#glow)'}));
+    }
+
+    // background
+    grp.appendChild(el('rect',{x:nx,y:ny,width:n.w,height:n.h,rx:'9',
+      fill:col.fill,stroke:col.stroke,'stroke-width':n.primary?'1.7':'1.1'}));
+
+    // left accent bar
+    grp.appendChild(el('rect',{x:nx,y:ny+6,width:'3',height:n.h-12,rx:'1.5',
+      fill:col.accent,opacity:n.primary?'.95':'.6'}));
+
+    // icon bg circle
+    grp.appendChild(el('circle',{cx:nx+17,cy:n.y,r:'9',fill:col.accent,opacity:'.1'}));
+    grp.appendChild(txt(n.icon,{x:nx+17,y:n.y,
+      'text-anchor':'middle','dominant-baseline':'middle',
+      'font-size':n.primary?'13':'11',fill:col.accent}));
+
+    // label
+    grp.appendChild(txt(n.label,{x:nx+31,y:n.y-(n.h>44?8:5),
+      'dominant-baseline':'middle',
+      'font-family':'Syne,sans-serif',
+      'font-size':n.primary?'12':'11','font-weight':n.primary?'700':'600',
+      fill:col.text,'letter-spacing':'-.01em'}));
+
+    // sub-label
+    grp.appendChild(txt(n.sub,{x:nx+31,y:n.y+(n.h>44?8:6),
+      'dominant-baseline':'middle',
+      'font-family':'JetBrains Mono,monospace',
+      'font-size':'8','font-weight':'500',
+      fill:col.accent,opacity:'.65','letter-spacing':'.02em'}));
+
+    nLayer.appendChild(grp);
+  }
+  svg.appendChild(nLayer);
+
+  /* Orchestrator label override — needs bigger sub font */
+  const orchSub=svg.querySelector('#n-orch text:last-child');
+  if(orchSub) orchSub.setAttribute('font-size','8.5');
+
+  /* BOTTOM ANNOTATION */
+  const ann=el('g',{opacity:'.25'});
+  ann.appendChild(txt('v1.2.0 · IBKR $1,100 stocks · OANDA $900 forex/crypto · Risk 1%/trade · Scan 15m · Select weekly',{
+    x:'800',y:'890','text-anchor':'middle','dominant-baseline':'middle',
+    'font-family':'JetBrains Mono,monospace','font-size':'8.5',fill:'#6080a0','letter-spacing':'.06em'}));
+  svg.appendChild(ann);
+});
+</script>
+</body>
+</html>

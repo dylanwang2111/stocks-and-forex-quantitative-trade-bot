@@ -37,78 +37,9 @@ logger = logging.getLogger(__name__)
 
 # EVZ (CBOE Euro Currency Volatility Index) thresholds
 _EVZ_HIGH   = 8.5   # above → high vol → reduce to 0.5×
-_EVZ_MEDIUM = 6.5   # above → moderate vol → reduce to 0.75×
-
-# For non-EUR pairs: ATR%-based thresholds (realised vol proxy)
-_FOREX_ATR_HIGH   = 0.008   # >0.8% ATR per 1h bar → high vol
-_FOREX_ATR_MEDIUM = 0.005   # >0.5% ATR per 1h bar → medium vol
-
-# EUR-based pairs that map to EVZ
-_EUR_PAIRS = {"EURUSD", "EURGBP", "EURJPY", "EURCHF", "EURAUD", "EURCAD"}
-
-# Module-level EVZ cache — refreshed at most once per hour from MacroContext
-_evz_cache: dict = {"value": 7.0, "updated_at": None}
-_EVZ_CACHE_TTL_SECONDS = 3600
-
-
-def update_evz_cache(evz: float) -> None:
-    """Called by the orchestrator after each MacroContext fetch to refresh EVZ."""
-    from datetime import datetime
-    _evz_cache["value"] = evz
-    _evz_cache["updated_at"] = datetime.utcnow()
-    logger.debug("RiskAgent: EVZ cache updated → %.2f", evz)
-
-
-def _get_evz() -> float:
-    """Return cached EVZ value (default 7.0 if never set)."""
-    return _evz_cache["value"]
-
-
-def _forex_vol_multiplier(symbol: str, atr: Optional[float], current_price: float) -> float:
-    """Return a [0.5, 1.0] volatility multiplier for a forex instrument.
-
-    - EUR pairs: use EVZ from the hourly-refreshed cache (populated by MacroContext).
-    - Other pairs: use the pair's own ATR% as a realised-vol proxy.
-    Falls back to 0.75 (conservative) on missing data.
-    """
-    try:
-        if symbol.upper() in _EUR_PAIRS:
-            evz_val = _get_evz()
-            if evz_val >= _EVZ_HIGH:
-                mult = 0.5
-            elif evz_val >= _EVZ_MEDIUM:
-                mult = 0.75
-            else:
-                mult = 1.0
-            logger.info("RiskAgent: %s forex vol (EVZ=%.2f) → multiplier=%.2f", symbol, evz_val, mult)
-            return mult
-        else:
-            # Use pair's own ATR% as realised-vol proxy
-            if atr is None or atr <= 0 or current_price <= 0:
-                return 0.75
-            atr_pct = atr / current_price
-            if atr_pct >= _FOREX_ATR_HIGH:
-                mult = 0.5
-            elif atr_pct >= _FOREX_ATR_MEDIUM:
-                mult = 0.75
-            else:
-                mult = 1.0
-            logger.info("RiskAgent: %s forex vol (atr_pct=%.3f%%) → multiplier=%.2f",
-                        symbol, atr_pct * 100, mult)
-            return mult
-    except Exception:
-        logger.debug("RiskAgent: forex_vol_multiplier failed for %s — defaulting to 0.75", symbol)
-        return 0.75
-
 # ATR-based stop multipliers (fixed per asset type)
 # Stock raised 2.0→2.5 to reduce stop-outs from 1h noise; TP scaled proportionally to keep ~2:1 R:R
-_ATR_SL_MULT: dict[str, float] = {"stock": 2.5, "forex": 3.0, "crypto": 2.0}
-
-# Minimum stop distance for forex as a fraction of entry price.
-# Guards against low-ATR entries (calm-market periods) where 3×ATR still
-# falls inside normal hourly noise (e.g. USDJPY <30 pips, USDCHF <25 pips).
-# 0.4% ≈ 63 pips USDJPY / 32 pips USDCHF / 43 pips EURUSD — survivable noise floor.
-_FOREX_MIN_STOP_PCT: float = 0.004
+_ATR_SL_MULT: dict[str, float] = {"stock": 2.5, "crypto": 2.0}
 
 # ATR-based TP multipliers — scale with confidence tier for better R:R on high-conviction trades
 # Stocks: scaled ×1.25 vs old values to maintain ~2:1 R:R with the wider 2.5×ATR stop
@@ -120,18 +51,6 @@ _ATR_TP_MULT_BY_TIER: dict[str, float] = {
     "FULL":   8.125,
 }
 _ATR_TP_MULT_DEFAULT = 5.0  # fallback if tier not found
-
-# Forex TP multipliers — larger because forex ATR% is ~10–20× smaller than stocks
-# (EURUSD 1h ATR ≈ 0.05–0.10% vs stocks 0.5–2%).  Using 10–15× brings the TP
-# distance to ~0.6–1.2% of price (60–120 pips on EURUSD), capturing sustained trends.
-# R:R improves to 6.7–10:1.
-# Tier:   SMALL  MEDIUM  LARGE  FULL
-_ATR_TP_MULT_BY_TIER_FOREX: dict[str, float] = {
-    "SMALL":  10.0,   # ~80 pips / ~0.74%
-    "MEDIUM": 12.0,   # ~96 pips / ~0.89%
-    "LARGE":  14.0,   # ~112 pips / ~1.04%
-    "FULL":   15.0,   # ~120 pips / ~1.11%
-}
 
 _TARGET_ATR_PCT = 0.02   # target 2% ATR exposure per position (for vol scaling)
 
@@ -145,10 +64,6 @@ _RISK_TIER_MULT: dict[str, float] = {
     "FULL":   2.0,
 }
 
-# Forex position multiplier — applied before vol/EVZ reduction.
-# Compensates for forex's tiny pip moves: at 1× a SMALL EURUSD position is ~100 units;
-# at 2× it reaches ~200 units, still well within the per-broker risk cap.
-_FOREX_SIZE_MULT = 1.5
 _MAX_POSITION_FRACTION = 0.667   # max single position = 2/3 of broker pool
 
 
@@ -275,15 +190,8 @@ class RiskAgent:
         position_size_usd = max_position_usd * size_fraction
 
         # ── Step 3b: apply volatility/macro risk multiplier ──────────────
-        # Forex: scale up first (_FOREX_SIZE_MULT), then apply EVZ/ATR vol reduction.
-        # Stocks/crypto: use LLM-derived macro_multiplier (VIX/news based)
-        asset_type_early = instrument.asset_type
-        if asset_type_early == "forex":
-            position_size_usd *= _FOREX_SIZE_MULT
-            macro_mult = _forex_vol_multiplier(symbol, atr, current_price)
-        else:
-            macro_mult = getattr(confidence_result, "macro_multiplier", 1.0)
-            macro_mult = max(0.0, min(macro_mult, 1.0))
+        macro_mult = getattr(confidence_result, "macro_multiplier", 1.0)
+        macro_mult = max(0.0, min(macro_mult, 1.0))
         position_size_usd *= macro_mult
         if macro_mult < 1.0:
             logger.info(
@@ -326,14 +234,7 @@ class RiskAgent:
             logger.warning("RiskAgent: %s current_price=%.6f is non-positive", symbol, current_price)
             return None
 
-        # For USD-base forex pairs (USDJPY, USDCAD, USDCHF): 1 OANDA unit = 1 USD of base
-        # → quantity = position_size_usd (NOT divided by price)
-        # For non-USD-base pairs (EURUSD, GBPUSD, AUDUSD, NZDUSD): 1 unit = 1 base currency
-        # → quantity = position_size_usd / price (standard formula)
-        if instrument.asset_type == "forex" and symbol.upper().startswith("USD"):
-            raw_qty = position_size_usd
-        else:
-            raw_qty = position_size_usd / current_price
+        raw_qty = position_size_usd / current_price
         quantity = self._round_quantity(raw_qty, instrument.asset_type)
 
         # ── Guard: quantity rounded to zero ───────────────────────────────
@@ -344,33 +245,17 @@ class RiskAgent:
             return None
 
         # ── Step 6: recompute position_size after rounding ──────────────────
-        if instrument.asset_type == "forex" and symbol.upper().startswith("USD"):
-            position_size_usd = quantity
-        else:
-            position_size_usd = quantity * current_price
+        position_size_usd = quantity * current_price
 
         # Step 7: stop and take-profit prices (ATR-based when available, fixed % fallback)
         direction = confidence_result.direction
         entry_price = current_price
         asset_type = instrument.asset_type
 
-        # Select TP multiplier table by asset type — forex uses a larger mult to
-        # compensate for its naturally lower ATR% (~0.05–0.10% vs stock 0.5–2%)
-        if asset_type == "forex":
-            tp_mult = _ATR_TP_MULT_BY_TIER_FOREX.get(tier.value, _ATR_TP_MULT_DEFAULT)
-        else:
-            tp_mult = _ATR_TP_MULT_BY_TIER.get(tier.value, _ATR_TP_MULT_DEFAULT)
+        tp_mult = _ATR_TP_MULT_BY_TIER.get(tier.value, _ATR_TP_MULT_DEFAULT)
         if atr is not None and atr > 0:
-            sl_dist = atr * _ATR_SL_MULT.get(asset_type, 2.0)
+            sl_dist = atr * _ATR_SL_MULT.get(asset_type, 2.5)
             tp_dist = atr * tp_mult
-            # Enforce minimum stop for forex — ATR can be artificially low during
-            # calm-market entries, making stops too tight to survive normal noise.
-            if asset_type == "forex":
-                min_sl = entry_price * _FOREX_MIN_STOP_PCT
-                if sl_dist < min_sl:
-                    # Scale TP by the same ratio so R:R is preserved
-                    tp_dist = tp_dist * (min_sl / sl_dist)
-                    sl_dist = min_sl
         else:
             sl_dist = entry_price * self.STOP_PCT
             tp_dist = entry_price * self.TP_PCT
@@ -390,25 +275,14 @@ class RiskAgent:
 
         # ── Step 8: risk in dollars ────────────────────────────────────────
         stop_distance = abs(entry_price - stop_price)
-        # For USD-base forex pairs (USDJPY, USDCHF, USDCAD), stop_distance is in
-        # the quote currency (JPY, CHF, CAD).  1 OANDA unit = 1 USD base, so the
-        # USD risk per unit = stop_distance / entry_price (quote units → USD).
-        # For all other instruments, price_diff × qty is already in USD.
-        _is_usd_base_forex = (instrument.asset_type == "forex" and symbol.upper().startswith("USD"))
-        if _is_usd_base_forex:
-            risk_dollars = (stop_distance / entry_price) * quantity
-        else:
-            risk_dollars = stop_distance * quantity
+        risk_dollars  = stop_distance * quantity
 
         # ── Step 9: cap risk at MAX_RISK_USD (per-broker pool) ────────────
         # Scale risk cap by position tier — LARGE/FULL trades are allowed to risk more.
         tier_risk_mult = _RISK_TIER_MULT.get(tier.value, 1.0)
         max_risk_usd = broker_cap * settings.bot.risk_per_trade * tier_risk_mult
         if risk_dollars > max_risk_usd:
-            if _is_usd_base_forex:
-                capped_qty = max_risk_usd / (stop_distance / entry_price)
-            else:
-                capped_qty = max_risk_usd / stop_distance
+            capped_qty = max_risk_usd / stop_distance
             # Floor (not round) so risk_dollars never exceeds MAX_RISK_USD after rounding
             quantity   = self._floor_quantity(capped_qty, instrument.asset_type)
 
@@ -419,12 +293,8 @@ class RiskAgent:
                 return None
 
             # Recompute derived values after cap
-            if _is_usd_base_forex:
-                position_size_usd = quantity
-                risk_dollars      = (stop_distance / entry_price) * quantity
-            else:
-                position_size_usd = quantity * current_price
-                risk_dollars      = stop_distance * quantity
+            position_size_usd = quantity * current_price
+            risk_dollars      = stop_distance * quantity
 
         # ── Emit DEBUG log ─────────────────────────────────────────────────
         logger.debug(
@@ -454,28 +324,12 @@ class RiskAgent:
 
     @staticmethod
     def _round_quantity(qty: float, asset_type: str) -> float:
-        """
-        Round quantity to the precision required by the asset type.
-        - stocks : 4 decimal places (fractional shares)
-        - forex  : nearest integer (OANDA units)
-        """
-        if asset_type == "forex":
-            return float(round(qty))
-        if asset_type == "crypto":
-            return round(qty, 4)
-        # stocks
+        """Round quantity to precision required by asset type (4 dp for stocks/crypto)."""
         return round(qty, 4)
 
     @staticmethod
     def _floor_quantity(qty: float, asset_type: str) -> float:
-        """
-        Floor quantity (used after risk-cap) so risk_dollars never exceeds MAX_RISK_USD.
-        - stocks : floor to 4 decimal places
-        - forex  : floor to nearest integer
-        """
-        if asset_type == "forex":
-            return float(math.floor(qty))
-        # stocks: floor at 4 dp
+        """Floor quantity to 4 dp so risk_dollars never exceeds MAX_RISK_USD after rounding."""
         factor = 10_000.0
         return math.floor(qty * factor) / factor
 
@@ -487,12 +341,11 @@ class RiskAgent:
 def test_risk_agent() -> None:
     """
     Verifies:
-    1. SMALL tier EURUSD → qty ≈ 77 units
-    2. FULL  tier SPY    → qty ≈ 0.6660 shares
-    3. risk_dollars <= MAX_RISK_USD after capping
-    4. NO_TRADE → returns None
-    5. long: stop below entry, tp above entry
-    6. short: stop above entry, tp below entry
+    1. FULL  tier SPY    → qty correct (risk-capped)
+    2. risk_dollars <= MAX_RISK_USD after capping
+    3. NO_TRADE → returns None
+    4. long: stop below entry, tp above entry
+    5. short: stop above entry, tp below entry
     """
     from dataclasses import dataclass as _dc
 
@@ -520,26 +373,7 @@ def test_risk_agent() -> None:
 
     agent = RiskAgent(state_manager=None)
 
-    # ── Test 1: SMALL tier — EURUSD at 1.08 ──────────────────────────────
-    # EURUSD is forex → broker="oanda" → uses broker_capital("oanda")
-    # EVZ cache defaults to 7.0 → _EVZ_MEDIUM threshold (6.5) hit → mult=0.75
-    oanda_cap = settings.bot.broker_capital("oanda")
-    max_pos_oanda = oanda_cap * _MAX_POSITION_FRACTION
-    evz_mult = _forex_vol_multiplier("EURUSD", None, 1.08)   # 0.75 at default EVZ=7.0
-    cr_small = make_cr(PositionTier.SMALL, "long")
-    rp = agent.compute(cr_small, current_price=1.08, symbol="EURUSD")
-    assert rp is not None, "SMALL tier should produce RiskParams"
-    expected_qty  = round(max_pos_oanda * PositionTier.SMALL.size_fraction() * _FOREX_SIZE_MULT * evz_mult / 1.08)
-    expected_size = expected_qty * 1.08
-    assert rp.quantity == float(expected_qty), f"Expected qty={expected_qty}, got {rp.quantity}"
-    assert rp.position_tier == "SMALL"
-    assert rp.size_fraction == PositionTier.SMALL.size_fraction()
-    assert abs(rp.position_size_usd - expected_size) < 0.01, (
-        f"position_size_usd mismatch: {rp.position_size_usd}"
-    )
-    print(f"Test 1 PASS — EURUSD SMALL: qty={rp.quantity}, size_usd={rp.position_size_usd:.2f}")
-
-    # ── Test 2: FULL tier — SPY at $500 ──────────────────────────────────
+    # ── Test 1: FULL tier — SPY at $500 ──────────────────────────────────
     # SPY is stock → broker="ibkr" → uses broker_capital("ibkr")
     ibkr_cap = settings.bot.broker_capital("ibkr")
     max_pos_ibkr = ibkr_cap * _MAX_POSITION_FRACTION
@@ -557,31 +391,24 @@ def test_risk_agent() -> None:
     assert rp2.quantity == expected_qty2, f"Expected qty={expected_qty2} (post-cap), got {rp2.quantity}"
     assert rp2.position_tier == "FULL"
     assert rp2.size_fraction == PositionTier.FULL.size_fraction()
-    print(f"Test 2 PASS — SPY FULL: qty={rp2.quantity}, size_usd={rp2.position_size_usd:.2f} (risk-capped)")
+    print(f"Test 1 PASS — SPY FULL: qty={rp2.quantity}, size_usd={rp2.position_size_usd:.2f} (risk-capped)")
 
-    # ── Test 3: risk_dollars <= broker_capital * risk_per_trade ──────────
-    # For EURUSD SMALL: stop_distance = 1.08 * 0.015 = 0.0162
-    # risk_dollars should be well under max_risk_usd, no cap needed
-    _max_risk = oanda_cap * settings.bot.risk_per_trade
-    assert rp.risk_dollars <= _max_risk, (
-        f"risk_dollars={rp.risk_dollars} exceeds max_risk_usd={_max_risk}"
-    )
-    # Force a scenario where capping IS triggered: FULL SPY (capped against ibkr pool)
+    # ── Test 2: risk_dollars <= broker_capital * risk_per_trade ──────────
     _max_risk_ibkr = ibkr_cap * settings.bot.risk_per_trade
     assert rp2.risk_dollars <= _max_risk_ibkr, (
         f"risk_dollars={rp2.risk_dollars} exceeds max_risk_usd after cap"
     )
-    print(f"Test 3 PASS — risk_dollars capped: EURUSD={rp.risk_dollars:.4f}, SPY={rp2.risk_dollars:.4f}")
+    print(f"Test 2 PASS — risk_dollars capped: SPY={rp2.risk_dollars:.4f}")
 
-    # ── Test 4: NO_TRADE returns None ────────────────────────────────────
+    # ── Test 3: NO_TRADE returns None ────────────────────────────────────
     cr_notrade = make_cr(PositionTier.NO_TRADE, "neutral")
-    rp_none = agent.compute(cr_notrade, current_price=1.08, symbol="EURUSD")
+    rp_none = agent.compute(cr_notrade, current_price=500.0, symbol="SPY")
     assert rp_none is None, f"NO_TRADE should return None, got {rp_none}"
-    print("Test 4 PASS — NO_TRADE returns None")
+    print("Test 3 PASS — NO_TRADE returns None")
 
-    # ── Test 5: long → stop below entry, tp above entry ──────────────────
+    # ── Test 4: long → stop below entry, tp above entry ──────────────────
     cr_long = make_cr(PositionTier.MEDIUM, "long")
-    rp_long = agent.compute(cr_long, current_price=1.0800, symbol="EURUSD")
+    rp_long = agent.compute(cr_long, current_price=500.0, symbol="SPY")
     assert rp_long is not None
     assert rp_long.stop_price < rp_long.entry_price, (
         f"long stop {rp_long.stop_price} should be below entry {rp_long.entry_price}"
@@ -590,13 +417,13 @@ def test_risk_agent() -> None:
         f"long tp {rp_long.take_profit_price} should be above entry {rp_long.entry_price}"
     )
     print(
-        f"Test 5 PASS — long: entry={rp_long.entry_price:.4f} "
+        f"Test 4 PASS — long: entry={rp_long.entry_price:.4f} "
         f"stop={rp_long.stop_price:.4f} tp={rp_long.take_profit_price:.4f}"
     )
 
-    # ── Test 6: short → stop above entry, tp below entry ─────────────────
+    # ── Test 5: short → stop above entry, tp below entry ─────────────────
     cr_short = make_cr(PositionTier.MEDIUM, "short")
-    rp_short = agent.compute(cr_short, current_price=1.0800, symbol="EURUSD")
+    rp_short = agent.compute(cr_short, current_price=500.0, symbol="SPY")
     assert rp_short is not None
     assert rp_short.stop_price > rp_short.entry_price, (
         f"short stop {rp_short.stop_price} should be above entry {rp_short.entry_price}"
@@ -605,7 +432,7 @@ def test_risk_agent() -> None:
         f"short tp {rp_short.take_profit_price} should be below entry {rp_short.entry_price}"
     )
     print(
-        f"Test 6 PASS — short: entry={rp_short.entry_price:.4f} "
+        f"Test 5 PASS — short: entry={rp_short.entry_price:.4f} "
         f"stop={rp_short.stop_price:.4f} tp={rp_short.take_profit_price:.4f}"
     )
 

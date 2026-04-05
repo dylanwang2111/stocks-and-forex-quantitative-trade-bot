@@ -2,7 +2,7 @@
 
 ## System Purpose
 
-Automated trading bot for a $2,000 account. Scans 6–10 instruments every 15 minutes, scores signals across 8 independent categories, sizes positions using confidence-tier Half-Kelly, and executes via IBKR (stocks) and OANDA (forex).
+Automated trading bot for a $2,000 account. Scans 6–10 instruments every 15 minutes, scores signals across 8 independent categories, sizes positions using confidence-tier Half-Kelly, and executes via IBKR (stocks) and OANDA (crypto).
 
 Supports paper (simulated) and live trading modes.
 
@@ -68,7 +68,7 @@ Orchestrator.scan_and_trade()
 Scanner.scan_all(UNIVERSE)
    For each instrument:
    ├── DataFetcher.fetch_candles(symbol, "5m" / "15m" / "1h")
-   │       └── IBKR → yfinance (stocks) | OANDA → IBKR → yfinance (forex)
+   │       └── IBKR → yfinance (stocks) | OANDA → yfinance (crypto)
    │
    ├── RegimeDetector.detect(df_1h)
    │       └── RegimeContext (TRENDING_UP / RANGING / HIGH_VOLATILITY / ...)
@@ -105,8 +105,8 @@ Scanner.scan_all(UNIVERSE)
        ▼
   ExecutionAgent.place_order(symbol, risk_params, ...)
        ├── Paper: synthetic fill at entry_price
-       ├── Live Stock: IBKR limit order + bracket
-       └── Live Forex: OANDA market order + SL/TP
+       ├── Live Stock:  IBKR limit order + bracket
+       └── Live Crypto: OANDA market order + SL/TP
        │
        ▼
   DB: Trade row (status="open")
@@ -135,7 +135,7 @@ Total Capital: $2,000
 │   ├── Reserve:     $450 (30%)
 │   └── Deployable: $1,050
 │
-└── OANDA Pool: $500 (forex)
+└── OANDA Pool: $500 (crypto)
     ├── Reserve:     $150 (30%)
     └── Deployable:  $350
 ```

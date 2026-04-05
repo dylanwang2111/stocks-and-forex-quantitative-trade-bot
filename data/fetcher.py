@@ -26,13 +26,6 @@ logger = logging.getLogger(__name__)
 
 # ── yfinance symbol mapping ────────────────────────────────────────────────────
 _SYMBOL_MAP: dict[str, str] = {
-    # Forex pairs
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
-    "AUDUSD": "AUDUSD=X",
-    "USDCAD": "CAD=X",
-    "USDCHF": "CHF=X",
     # Crypto
     "BTCUSD": "BTC-USD",
     "ETHUSD": "ETH-USD",
@@ -130,18 +123,18 @@ def _next_ibkr_client_id() -> int:
 
 def _is_forex(symbol: str) -> bool:
     """
-    Return True if symbol should be routed via OANDA (forex or crypto).
-    Checks UNIVERSE_BY_SYMBOL first; falls back to 6-char all-alpha heuristic.
+    Return True if symbol should be routed via OANDA (crypto only now that forex is removed).
+    Checks UNIVERSE_BY_SYMBOL first; falls back to known crypto suffix heuristic.
     """
     try:
         from portfolio.watchlist import UNIVERSE_BY_SYMBOL
         inst = UNIVERSE_BY_SYMBOL.get(symbol.upper())
         if inst is not None:
-            return inst.asset_type in ("forex", "crypto")
+            return inst.asset_type == "crypto"
     except Exception:
         pass
-    sym = symbol.upper().replace("/", "")
-    return len(sym) == 6 and sym.isalpha()
+    sym = symbol.upper()
+    return sym.endswith("USD") and sym[:3] in ("BTC", "ETH", "LTC", "SOL", "ADA")
 
 
 # ── OANDA backend ──────────────────────────────────────────────────────────────

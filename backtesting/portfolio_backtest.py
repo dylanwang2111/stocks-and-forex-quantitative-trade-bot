@@ -30,28 +30,26 @@ from portfolio.watchlist import CORRELATION_BLACKLIST, UNIVERSE
 
 # ── Fee schedule (round-trip) ──────────────────────────────────────────────────
 _FEES: dict[str, float] = {
-    "stock": 0.001,   # 0.1% round-trip
-    "forex": 0.0003,  # 0.03% round-trip (OANDA spread)
+    "stock":  0.001,   # 0.1% round-trip
+    "crypto": 0.002,   # 0.2% round-trip (OANDA spread)
 }
 
 # ATR-based stop loss / take-profit multipliers
-# Long SL: entry - N*ATR, Long TP: entry + M*ATR
-# Short SL: entry + N*ATR, Short TP: entry - M*ATR
 _ATR_SL_MULT: dict[str, float] = {
-    "stock": 2.0,
-    "forex": 1.5,
+    "stock":  2.0,
+    "crypto": 2.0,
 }
 _ATR_TP_MULT: dict[str, float] = {
-    "stock": 4.0,    # R:R 2.0:1  (stock ATR% is 0.5–2% per bar)
-    "forex": 10.0,   # R:R 6.7:1  (forex ATR% is ~0.05–0.10% per bar; 10× ≈ 80 pips / ~0.74%)
+    "stock":  4.0,    # R:R 2.0:1
+    "crypto": 4.0,
 }
 # Trailing stop: exit when close pulls back N*ATR from the position's best price
 _ATR_TRAIL_MULT: dict[str, float] = {
-    "stock": 1.5,
-    "forex": 0.0,   # disabled for forex
+    "stock":  1.5,
+    "crypto": 1.5,
 }
-_FALLBACK_SL: dict[str, float] = {"stock": 0.015, "forex": 0.0075}
-_FALLBACK_TP: dict[str, float] = {"stock": 0.030, "forex": 0.015}
+_FALLBACK_SL: dict[str, float] = {"stock": 0.015, "crypto": 0.015}
+_FALLBACK_TP: dict[str, float] = {"stock": 0.030, "crypto": 0.030}
 
 _ASSET_TYPE: dict[str, str] = {
     inst.symbol: inst.asset_type for inst in UNIVERSE

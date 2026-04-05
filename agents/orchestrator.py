@@ -63,7 +63,6 @@ _MARKET_CLOSE_UTC = dt_time(20, 0)
 # otherwise the trade is considered dead and closed.
 _STALE_MIN_PNL_PCT: dict[str, float] = {
     "stock":  0.005,   # 0.5% — stocks have larger intraday noise
-    "forex":  0.003,   # 0.3% — forex moves are smaller
     "crypto": 0.003,   # 0.3%
 }
 
@@ -622,14 +621,6 @@ class Orchestrator:
             self._state.save_snapshot()
         except Exception:
             logger.exception("save_snapshot: failed")
-        # Refresh EVZ cache for forex vol sizing (once per hour is sufficient)
-        try:
-            from agents.portfolio_agent import _fetch_macro_context_shared
-            from agents.risk_agent import update_evz_cache
-            ctx = _fetch_macro_context_shared()
-            update_evz_cache(ctx.evz)
-        except Exception:
-            logger.debug("save_snapshot: EVZ cache refresh failed — keeping previous value")
         try:
             positions      = self._state.all_positions()
             daily_pnl      = self._state.daily_pnl()

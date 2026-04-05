@@ -93,7 +93,6 @@ Prevents holding two highly correlated positions simultaneously. Applies at **tr
 ### Rules
 
 1. **Pairwise correlation**: If symbol A is in `correlated_with` list of any currently-open position, entry is blocked.
-2. **Forex limit**: Max `MAX_FOREX` forex positions simultaneously (default 2, set via `MAX_FOREX` env var).
 
 ### Examples
 
@@ -103,12 +102,8 @@ Candidate: XOM → BLOCKED (XOM is in energy correlation group)
 Candidate: CVX → BLOCKED
 Candidate: NVDA → ALLOWED (different sector)
 
-Open positions: EURUSD, USDJPY (2 forex, at MAX_FOREX default)
-Candidate: AUDUSD → BLOCKED (forex limit reached)
-
-Open positions: EURUSD (1 forex)
-Candidate: USDJPY → ALLOWED (below MAX_FOREX limit)
-Candidate: GBPUSD → BLOCKED (correlated with EURUSD via blacklist)
+Open position: BTCUSD
+Candidate: ETHUSD → BLOCKED (correlated with BTCUSD via blacklist)
 ```
 
 ### API

@@ -77,19 +77,12 @@ The hourly snapshot (`save_snapshot`) uses `use_cache=True` to reuse prices alre
 
 ## Symbol Mapping
 
-yfinance uses non-standard tickers for forex. The `_SYMBOL_MAP` translates internal symbols to yfinance format:
+yfinance uses non-standard tickers for crypto. The `_SYMBOL_MAP` translates internal symbols to yfinance format:
 
 | Internal | yfinance |
 |----------|----------|
-| `EURUSD` | `EURUSD=X` |
-| `GBPUSD` | `GBPUSD=X` |
-| `AUDUSD` | `AUDUSD=X` |
-| `NZDUSD` | `NZDUSD=X` |
-| `USDJPY` | `JPY=X` |
-| `USDCAD` | `CAD=X` |
-| `USDCHF` | `CHF=X` |
-
-> **USD-base pairs** (USDJPY, USDCAD, USDCHF): in OANDA, 1 unit = 1 USD of base currency. Quantity sizing does NOT divide by price — `quantity = position_size_usd` directly. P&L is in the quote currency (JPY, CAD, CHF) and must be divided by the current price to convert to USD.
+| `BTCUSD` | `BTC-USD` |
+| `ETHUSD` | `ETH-USD` |
 
 Stock and ETF symbols map 1:1 (`NVDA` → `NVDA`).
 
@@ -123,13 +116,13 @@ Uses `oandapyV20.InstrumentsCandles` API.
 
 ```python
 _fetch_oanda(symbol, timeframe) → pd.DataFrame
-  1. Map symbol to OANDA format: "EURUSD" → "EUR_USD"
+  1. Map symbol to OANDA format: "BTCUSD" → "BTC_USD"
   2. Request candles (count=500, granularity from config)
   3. Parse bid/ask mid-point
   4. Normalize → OHLCV DataFrame
 ```
 
-OANDA is only used for forex symbols. It provides the most reliable and lowest-latency forex data.
+OANDA is only used for crypto symbols. It provides reliable crypto data via its CFD instruments.
 
 ---
 
@@ -161,7 +154,7 @@ yfinance rate limits (`YFRateLimitError`) are handled at multiple levels:
 |---------|----------|
 | Scan cycle (real-time) | IBKR primary → yfinance skipped or retried once |
 | Portfolio scoring | Bulk fetch fails → IBKR sequential fallback |
-| Macro context (VIX/GLD/USO/EVZ) | Silent fallback to neutral (0 macro score / EVZ=7.0) |
+| Macro context (VIX/GLD/USO) | Silent fallback to neutral (0 macro score) |
 | Snapshot P&L | Cached price used (15-min TTL); WARNING logged if all sources fail |
 
 The bot never blocks or crashes on a rate limit. All fetch paths have graceful fallbacks.

@@ -22,7 +22,7 @@ TRADING_MODE=paper           # paper | live
 # ── Capital ──────────────────────────────────────────────────────────────────
 TOTAL_CAPITAL=2000
 IBKR_CAPITAL=1500            # Stocks broker pool
-OANDA_CAPITAL=500            # Forex broker pool
+OANDA_CAPITAL=500            # Crypto broker pool
 CASH_RESERVE_PCT=0.30        # 30% never deployed
 RISK_PER_TRADE=0.03          # 3% of broker pool per trade
 
@@ -84,7 +84,7 @@ settings.telegram.enabled      # bool (True if token + chat_id both set)
 | `trading_mode` | `"paper"` | `"paper"` or `"live"` |
 | `total_capital` | `2000` | Total account balance |
 | `ibkr_capital` | `1500` | IBKR broker pool |
-| `oanda_capital` | `500` | OANDA broker pool |
+| `oanda_capital` | `500` | OANDA broker pool (crypto) |
 | `cash_reserve_pct` | `0.30` | Fraction never deployed |
 | `risk_per_trade` | `0.03` | Max risk per trade (fraction of broker pool) |
 | `min_confidence` | `55` | Minimum score to enter (SMALL tier) |

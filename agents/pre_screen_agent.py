@@ -9,7 +9,7 @@ Scores all instruments in CANDIDATE_POOL on 30 days of daily bars using:
 
 Selects:
   - Top MAX_STOCKS stocks (correlation-aware greedy)
-  - Top MAX_FOREX forex (by score)
+  - Top MAX_CRYPTO crypto (BTC anchor always included)
 
 Calls set_active_universe() to swap the live universe atomically.
 """
@@ -45,14 +45,13 @@ class PreScreenAgent:
     """
     Daily pre-screen: lighter than PortfolioAgent (30d data, softer EMA gate).
 
-    Gate:  EMA9 > EMA21 (both stocks and forex — softer than weekly agent)
+    Gate:  EMA9 > EMA21 (softer than weekly agent)
 
     Score = technical (0-6) + fundamental (0-4) + macro context (0-3)
     Macro context is fetched once and shared across all instruments.
     """
 
     MAX_STOCKS: int  = settings.bot.max_stocks
-    MAX_FOREX: int   = settings.bot.max_forex
     MAX_CRYPTO: int  = settings.bot.max_crypto
     MIN_BARS: int    = 20
 
@@ -130,13 +129,9 @@ class PreScreenAgent:
                 if instrument.asset_type == "crypto":
                     continue  # crypto is OANDA-only — IBKR has no definition for these
                 try:
-                    if instrument.asset_type == "forex":
-                        contract = Forex(sym.upper().replace("/", ""))
-                        what = "MIDPOINT"
-                    else:
-                        from ib_insync import Stock
-                        contract = Stock(sym.upper(), "SMART", "USD")
-                        what = "TRADES"
+                    from ib_insync import Stock
+                    contract = Stock(sym.upper(), "SMART", "USD")
+                    what = "TRADES"
                     bars = ib.reqHistoricalData(
                         contract, endDateTime="", durationStr="30 D",
                         barSizeSetting="1 day", whatToShow=what,
@@ -201,7 +196,6 @@ class PreScreenAgent:
         macro = _fetch_macro_context_shared()
 
         scored_stocks: list[tuple[float, Instrument]] = []
-        scored_forex:  list[tuple[float, Instrument]] = []
         scored_crypto: list[tuple[float, Instrument]] = []
 
         for instrument in CANDIDATE_POOL:
@@ -215,11 +209,8 @@ class PreScreenAgent:
                 scored_stocks.append((score, instrument))
             elif instrument.asset_type == "crypto":
                 scored_crypto.append((score, instrument))
-            else:
-                scored_forex.append((score, instrument))
 
         scored_stocks.sort(key=lambda t: t[0], reverse=True)
-        scored_forex.sort(key=lambda t: t[0], reverse=True)
         scored_crypto.sort(key=lambda t: t[0], reverse=True)
 
         # Greedy correlation-aware + sector-capped stock selection
@@ -242,13 +233,6 @@ class PreScreenAgent:
             selected_symbols.add(inst.symbol)
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        # Forex: select top MAX_FOREX by score
-        selected_forex: list[Instrument] = []
-        for _score, inst in scored_forex:
-            if len(selected_forex) >= self.MAX_FOREX:
-                break
-            selected_forex.append(inst)
-
         # Crypto: force-include BTC anchor, fill remaining slots by score
         _BTC_ANCHOR = "BTCUSD"
         btc_inst = next((i for _s, i in scored_crypto if i.symbol == _BTC_ANCHOR), None)
@@ -265,17 +249,16 @@ class PreScreenAgent:
                 break
             selected_crypto.append(inst)
 
-        selected = selected_stocks + selected_forex + selected_crypto
+        selected = selected_stocks + selected_crypto
 
         if not selected:
             logger.warning("PreScreenAgent: no instruments passed — keeping existing UNIVERSE")
             return []
 
         logger.info(
-            "PreScreenAgent selected %d: stocks=[%s] forex=[%s] crypto=[%s]",
+            "PreScreenAgent selected %d: stocks=[%s] crypto=[%s]",
             len(selected),
             ", ".join(i.symbol for i in selected_stocks),
-            ", ".join(i.symbol for i in selected_forex),
             ", ".join(i.symbol for i in selected_crypto),
         )
         set_active_universe(selected)

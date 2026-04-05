@@ -42,11 +42,11 @@ Only three parameters are tunable per optimization cycle. All others are locked 
 | Parameter | Env Var | Default | Range | Description |
 |-----------|---------|---------|-------|-------------|
 | `confidence_threshold` | `MIN_CONFIDENCE` | 55.0 | 55–85 | Minimum confidence score to enter a trade |
-| `atr_sl_mult` | — | 2.0 (stock), 1.5 (forex) | 1.0–4.0 | ATR multiplier for the Phase 1 hard stop-loss |
-| `atr_tp_mult` | — | 4.0 (SMALL tier, stocks) | 2.0–10.0 | ATR multiplier for the Phase 1 take-profit target (stocks only; forex uses a separate fixed table: 8–13×) |
+| `atr_sl_mult` | — | 2.0 (stocks/crypto) | 1.0–4.0 | ATR multiplier for the Phase 1 hard stop-loss |
+| `atr_tp_mult` | — | 4.0 (SMALL tier) | 2.0–10.0 | ATR multiplier for the Phase 1 take-profit target |
 
 **Locked parameters** (never proposed by Gemini):
-`total_capital`, `ibkr_capital`, `oanda_capital`, `cash_reserve`, `max_positions`, `max_stocks`, `max_forex`, `max_crypto`, `risk_per_trade`, `target_atr_pct`, `swing_holding_days`, `partial_exit_fraction`, `rsi_period`, `ema_length`
+`total_capital`, `ibkr_capital`, `oanda_capital`, `cash_reserve`, `max_positions`, `max_stocks`, `max_crypto`, `risk_per_trade`, `target_atr_pct`, `swing_holding_days`, `partial_exit_fraction`, `rsi_period`, `ema_length`
 
 Changes are capped at ±20% from the current value per cycle to keep adjustments conservative.
 

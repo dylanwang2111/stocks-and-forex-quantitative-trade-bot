@@ -110,7 +110,7 @@ Full table of all open positions.
 | To Stop% | Distance from current price to stop as % (positive = not yet hit) |
 | To TP% | Distance from current price to TP as % |
 | TP Progress | Progress bar: % of the entry→TP range covered; >100% = past target |
-| Unreal P&L | USD P&L: for stocks/non-USD forex `(current − entry) × qty`; for USD-base forex (USDJPY, USDCHF, USDCAD) `(current − entry) / current × qty` to convert from quote currency to USD |
+| Unreal P&L | USD P&L: `(current − entry) × qty` for longs; `(entry − current) × qty` for shorts |
 | Qty | Units held |
 | Held | Trading days held (see note below) |
 | Left | `SWING_HOLDING_DAYS − Held` |
@@ -118,7 +118,7 @@ Full table of all open positions.
 | Conf | Confidence score at entry |
 
 **Held / Left day counting**:
-- **Stocks and forex**: weekdays only — Saturday and Sunday do not consume holding budget
+- **Stocks**: weekdays only — Saturday and Sunday do not consume holding budget
 - **Crypto (BTCUSD, ETHUSD)**: calendar days — market runs 24/7
 
 This matches exactly how the time-exit trigger counts days in the orchestrator (`_check_exits()`).

@@ -3,7 +3,7 @@ agents/portfolio_agent.py
 Weekly portfolio selection agent.
 
 Evaluates all instruments in CANDIDATE_POOL on 60 days of daily data.
-Selects the top MAX_STOCKS stocks + MAX_FOREX forex pairs, then calls
+Selects the top MAX_STOCKS stocks + MAX_CRYPTO crypto instruments, then calls
 set_active_universe() to update the live UNIVERSE.
 
 Selection runs on startup and every Monday at 00:00 UTC.
@@ -108,7 +108,7 @@ class PortfolioAgent:
 
     Long-bias gate (hard filter before scoring):
       - Stocks : EMA9 > EMA21 AND EMA21 > EMA50 required
-      - Forex  : EMA9 > EMA21 required (softer — forex can reverse quickly)
+      - Crypto : EMA9 > EMA21 required
 
     Technical scoring (0–6 pts):
       +1  ADX(14) > 25          — trending
@@ -133,7 +133,6 @@ class PortfolioAgent:
     """
 
     MAX_STOCKS: int  = settings.bot.max_stocks
-    MAX_FOREX: int   = settings.bot.max_forex
     MAX_CRYPTO: int  = settings.bot.max_crypto
     MIN_BARS: int    = 20
     MAX_PER_SECTOR: int = 2   # max stocks from any single sector
@@ -356,7 +355,6 @@ class PortfolioAgent:
         macro = self._fetch_macro_context()
 
         scored_stocks: list[tuple[float, Instrument]] = []
-        scored_forex:  list[tuple[float, Instrument]] = []
         scored_crypto: list[tuple[float, Instrument]] = []
 
         for instrument in CANDIDATE_POOL:
@@ -371,11 +369,8 @@ class PortfolioAgent:
                 scored_stocks.append((score, instrument))
             elif instrument.asset_type == "crypto":
                 scored_crypto.append((score, instrument))
-            else:
-                scored_forex.append((score, instrument))
 
         scored_stocks.sort(key=lambda t: t[0], reverse=True)
-        scored_forex.sort(key=lambda t: t[0], reverse=True)
         scored_crypto.sort(key=lambda t: t[0], reverse=True)
 
         # Log top candidates for transparency
@@ -398,13 +393,6 @@ class PortfolioAgent:
             selected_stocks.append(inst)
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        # Forex: select top MAX_FOREX by score
-        selected_forex: list[Instrument] = []
-        for _s, inst in scored_forex:
-            if len(selected_forex) >= self.MAX_FOREX:
-                break
-            selected_forex.append(inst)
-
         # Crypto: force-include BTC anchor, fill remaining slots by score
         btc_inst = next((i for _s, i in scored_crypto if i.symbol == _BTC_ANCHOR), None)
         if btc_inst is None:
@@ -420,17 +408,16 @@ class PortfolioAgent:
                 break
             selected_crypto.append(inst)
 
-        selected = selected_stocks + selected_forex + selected_crypto
+        selected = selected_stocks + selected_crypto
 
         if not selected:
             logger.warning("PortfolioAgent: no instruments passed — keeping existing UNIVERSE")
             return []
 
         logger.info(
-            "PortfolioAgent selected %d: stocks=[%s] forex=[%s] crypto=[%s]",
+            "PortfolioAgent selected %d: stocks=[%s] crypto=[%s]",
             len(selected),
             ", ".join(i.symbol for i in selected_stocks),
-            ", ".join(i.symbol for i in selected_forex),
             ", ".join(i.symbol for i in selected_crypto),
         )
         set_active_universe(selected)
@@ -648,14 +635,14 @@ def test_portfolio_agent() -> None:
         print("Integration test: SKIPPED")
         return
 
-    max_possible = PortfolioAgent.MAX_STOCKS + PortfolioAgent.MAX_FOREX
+    max_possible = PortfolioAgent.MAX_STOCKS + PortfolioAgent.MAX_CRYPTO
     assert 1 <= len(selected) <= max_possible, (
         f"Expected 1–{max_possible} instruments, got {len(selected)}"
     )
     print(f"PASS: selected {len(selected)} instruments")
 
     for inst in selected:
-        assert inst.asset_type in ("stock", "forex", "crypto")
+        assert inst.asset_type in ("stock", "crypto")
     print("PASS: all asset types valid")
 
     assert len(UNIVERSE) == len(selected)

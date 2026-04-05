@@ -237,12 +237,6 @@ def _parse_gemini_response(
 def _rss_symbol(symbol: str) -> str:
     """Map bot symbols to Yahoo Finance RSS ticker format."""
     mapping = {
-        "EURUSD": "EURUSD=X",
-        "GBPUSD": "GBPUSD=X",
-        "USDJPY": "JPY=X",
-        "AUDUSD": "AUDUSD=X",
-        "USDCAD": "CAD=X",
-        "USDCHF": "CHF=X",
         "BTCUSD": "BTC-USD",
         "ETHUSD": "ETH-USD",
     }

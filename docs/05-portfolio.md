@@ -13,17 +13,17 @@ Defines all tradeable instruments and their metadata.
 ```python
 @dataclass
 class Instrument:
-    symbol: str               # e.g. "NVDA", "EURUSD"
+    symbol: str               # e.g. "NVDA", "BTCUSD"
     broker: str               # "ibkr" | "oanda"
-    asset_type: str           # "stock" | "forex"
-    yf_symbol: str            # Yahoo Finance ticker (e.g. "EURUSD=X")
+    asset_type: str           # "stock" | "crypto"
+    yf_symbol: str            # Yahoo Finance ticker (e.g. "BTC-USD")
     active_hours_utc: tuple   # (open_hour, close_hour) — e.g. (13, 20) for US stocks
     slippage_pct: float       # Expected slippage (0.001 = 0.1%)
     min_position_usd: float   # Minimum position size
     correlated_with: list[str]  # Symbols that cannot be held simultaneously
 ```
 
-### CANDIDATE_POOL (45 instruments)
+### CANDIDATE_POOL (38 instruments)
 
 The full universe evaluated weekly/daily by PortfolioAgent/PreScreenAgent:
 
@@ -40,7 +40,6 @@ The full universe evaluated weekly/daily by PortfolioAgent/PreScreenAgent:
 | Gold | GLD, GOLD, NEM, GDX, GDXJ |
 | Consumer | WMT, COST |
 | Industrial | CAT |
-| Forex | EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD |
 | Crypto | BTCUSD, ETHUSD |
 
 ### Active UNIVERSE
@@ -67,8 +66,6 @@ Instruments with high correlation cannot be held simultaneously. Groups:
 | Tech cluster | QQQ ↔ NVDA, AMD, MSFT, AAPL |
 | Energy cluster | XOM ↔ CVX ↔ OXY ↔ COP ↔ XLE |
 | Gold cluster | GOLD ↔ NEM ↔ GDX ↔ GDXJ |
-| Forex EUR | EURUSD ↔ GBPUSD |
-| Forex commodity | AUDUSD ↔ NZDUSD |
 | Consumer | WMT ↔ COST |
 | Healthcare | JNJ ↔ UNH |
 | Crypto | BTCUSD ↔ ETHUSD |
@@ -109,7 +106,7 @@ class ScanResult:
     regime: RegimeContext
     bundle: SignalBundle
     blocked: bool
-    block_reason: str         # e.g. "correlation: EURUSD held", "PDT limit"
+    block_reason: str         # e.g. "correlation: BTCUSD held", "PDT limit"
     atr: float                # from 1h data (used for adaptive stops)
     ema50_1h: float           # for EMA50 filter
     current_price: float      # last 1h close
@@ -134,9 +131,9 @@ top_opportunity(results) → ScanResult | None
 Every scan cycle logs per-instrument at INFO level:
 
 ```
-scan: NVDA  | dir=long  bull=66.7 bear= 0.0 score=66.7 tier=SMALL
-scan: EURUSD | dir=short bull= 0.0 bear=55.6 score=55.6 tier=SMALL
-scan: XOM   | dir=long  bull=44.4 bear=11.1 score=44.4 tier=NO_TRADE
+scan: NVDA   | dir=long  bull=66.7 bear= 0.0 score=66.7 tier=SMALL
+scan: BTCUSD | dir=short bull= 0.0 bear=55.6 score=55.6 tier=SMALL
+scan: XOM    | dir=long  bull=44.4 bear=11.1 score=44.4 tier=NO_TRADE
 ```
 
 ---
@@ -220,7 +217,7 @@ Enforces the Pattern Day Trader (PDT) rule for US stock accounts under $25,000.
 
 A **day trade** is opening and closing a stock position on the same calendar day. Accounts under $25,000 are limited to **3 day trades per rolling 5-business-day window**.
 
-Forex positions are exempt from PDT rules.
+Crypto positions are exempt from PDT rules.
 
 ### How It Works
 
@@ -248,4 +245,4 @@ Before entering a stock trade, the scanner calls `can_day_trade()`. If the limit
 When PDT limit is reached, the bot automatically enters swing-only mode for stocks:
 - Existing positions are held normally (exits still fire)
 - No new stock entries for the rest of the 5-day window
-- Forex trading continues unaffected
+- Crypto trading continues unaffected

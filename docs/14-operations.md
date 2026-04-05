@@ -104,9 +104,9 @@ grep -E "Trade opened|Trade closed|TRADE" logs/paper_YYYYMMDD.log
 Every 15 minutes, per-instrument scores are logged at INFO level:
 
 ```
-scan: NVDA  | dir=long  bull=66.7 bear= 0.0 score=66.7 tier=SMALL
-scan: EURUSD | dir=short bull= 0.0 bear=55.6 score=55.6 tier=SMALL
-scan: XLE   | dir=long  bull=44.4 bear=11.1 score=44.4 tier=NO_TRADE
+scan: NVDA   | dir=long  bull=66.7 bear= 0.0 score=66.7 tier=SMALL
+scan: BTCUSD | dir=short bull= 0.0 bear=55.6 score=55.6 tier=SMALL
+scan: XLE    | dir=long  bull=44.4 bear=11.1 score=44.4 tier=NO_TRADE
 scan: CVX blocked by CorrelationGuard — CVX is correlated with open position XLE
 ```
 

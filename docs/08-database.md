@@ -23,12 +23,12 @@ DATABASE_URL=postgresql://user:pass@localhost/trade_signet
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | Integer PK | Auto-increment |
-| `symbol` | String | e.g. `"NVDA"`, `"EURUSD"` |
+| `symbol` | String | e.g. `"NVDA"`, `"BTCUSD"` |
 | `broker` | String | `"ibkr"` or `"oanda"` |
 | `direction` | String | `"long"` or `"short"` |
 | `entry_price` | Float | Fill price at open |
 | `exit_price` | Float | Fill price at close (null if open) |
-| `quantity` | Float | Shares or forex units |
+| `quantity` | Float | Shares or crypto units |
 | `confidence` | Float | Dominant score (0–100) at entry |
 | `position_tier` | String | `SMALL` / `MEDIUM` / `LARGE` / `FULL` |
 | `regime` | String | Market regime at entry |
