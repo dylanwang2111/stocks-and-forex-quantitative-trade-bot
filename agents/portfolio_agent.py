@@ -414,6 +414,15 @@ class PortfolioAgent:
             logger.warning("PortfolioAgent: no instruments passed — keeping existing UNIVERSE")
             return []
 
+        # If bulk data fetch failed entirely AND no stocks were scored, it's a data outage
+        # (IBKR maintenance window or yfinance rate limit). Keep existing universe.
+        if bulk_failed and not selected_stocks:
+            logger.warning(
+                "PortfolioAgent: bulk data fetch failed and no stocks scored — "
+                "keeping existing UNIVERSE to avoid data-outage universe wipe"
+            )
+            return []
+
         logger.info(
             "PortfolioAgent selected %d: stocks=[%s] crypto=[%s]",
             len(selected),

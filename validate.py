@@ -75,6 +75,53 @@ def _cache_path(symbols: list[str], start: str, end: str) -> "Path":
     return cache_dir / f"daily_{h}.pkl"
 
 
+def _ibkr_fetch_daily(symbol: str, start: str, end: str) -> "pd.DataFrame | None":
+    """Fetch daily bars for one symbol from IBKR (fallback when yfinance is rate-limited).
+    Uses the same infrastructure as data/fetcher._fetch_ibkr."""
+    try:
+        import asyncio
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        import pandas as pd
+        from ib_insync import IB, Stock, util
+        from config.settings import settings
+        from data.fetcher import _next_ibkr_client_id
+
+        host = settings.ibkr.host
+        port = settings.ibkr.port
+        clientId = _next_ibkr_client_id()
+
+        contract = Stock(symbol, "SMART", "USD")
+        ib = IB()
+        try:
+            ib.connect(host, port, clientId=clientId, timeout=10, readonly=True)
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr="5 Y",
+                barSizeSetting="1 day",
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=2,
+            )
+        finally:
+            if ib.isConnected():
+                ib.disconnect()
+
+        if not bars:
+            return None
+
+        df = util.df(bars)[["date", "open", "high", "low", "close", "volume"]].copy()
+        df = df.rename(columns={"date": "time"})
+        df["time"] = pd.to_datetime(df["time"], utc=True)
+        df = df.set_index("time").sort_index()
+        df = df[(df.index >= pd.Timestamp(start, tz="UTC")) &
+                (df.index <= pd.Timestamp(end, tz="UTC"))]
+        return df if not df.empty else None
+    except Exception as exc:
+        print(f"  IBKR fallback failed for {symbol}: {exc}")
+        return None
+
+
 def bulk_fetch_daily(
     symbols: list[str],
     start: str,
@@ -83,8 +130,8 @@ def bulk_fetch_daily(
     """
     Download daily OHLCV for all symbols in a single yfinance API call.
     Results are cached to disk so repeated runs don't re-hit yfinance rate limits.
+    Falls back to individual yfinance downloads, then IBKR, on rate-limit failure.
     Returns {symbol: DataFrame} mapping. Symbols that fail are omitted.
-    Falls back to an empty dict on total failure.
     """
     import pickle
     from pathlib import Path
@@ -106,7 +153,10 @@ def bulk_fetch_daily(
     sym_to_yf   = {s.upper(): _SYMBOL_MAP.get(s.upper(), s.upper()) for s in symbols}
     yf_to_sym   = {v: k for k, v in sym_to_yf.items()}
 
+    import time
+
     print(f"  Bulk-fetching {len(yf_symbols)} symbols from {start} to {end}…", flush=True)
+    raw = None
     try:
         raw = yf.download(
             yf_symbols,
@@ -119,11 +169,51 @@ def bulk_fetch_daily(
         )
     except Exception as exc:
         print(f"  Bulk fetch failed: {exc}")
-        return {}
 
-    if raw.empty:
-        print("  Bulk fetch returned empty data.")
-        return {}
+    if raw is None or raw.empty:
+        # Fallback: individual downloads with small delays to avoid rate limits
+        print("  Falling back to individual symbol downloads…", flush=True)
+        result: dict[str, pd.DataFrame] = {}
+        for i, (yf_sym, orig_sym) in enumerate(yf_to_sym.items()):
+            if i > 0:
+                time.sleep(1.5)
+            try:
+                df = yf.download(yf_sym, start=start, end=end, interval="1d",
+                                 auto_adjust=True, progress=False)
+                if df.empty:
+                    raise ValueError("empty response")
+                df.columns = [c.lower() for c in df.columns]
+                df = df[["open", "high", "low", "close", "volume"]].copy()
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize("UTC")
+                else:
+                    df.index = df.index.tz_convert("UTC")
+                df = df.dropna(subset=["close"])
+                if not df.empty:
+                    result[orig_sym] = df
+                    print(f"  {orig_sym}: {len(df)} rows", flush=True)
+            except Exception as exc2:
+                # Final fallback: IBKR (skipped for crypto since IBKR doesn't have BTC/ETH daily)
+                from portfolio.watchlist import CANDIDATE_POOL_BY_SYMBOL
+                inst = CANDIDATE_POOL_BY_SYMBOL.get(orig_sym)
+                if inst and inst.asset_type == "stock":
+                    print(f"  {orig_sym}: yfinance failed ({type(exc2).__name__}), trying IBKR…", flush=True)
+                    df = _ibkr_fetch_daily(orig_sym, start, end)
+                    if df is not None and not df.empty:
+                        result[orig_sym] = df
+                        print(f"  {orig_sym}: {len(df)} rows (IBKR)", flush=True)
+                    else:
+                        print(f"  Warning: {orig_sym} failed all sources")
+                else:
+                    print(f"  Warning: {orig_sym} skipped (crypto, yfinance failed: {type(exc2).__name__})")
+        if result:
+            try:
+                with open(cache_file, "wb") as f:
+                    pickle.dump(result, f)
+                print(f"  Cached to {cache_file.name}", flush=True)
+            except Exception:
+                pass
+        return result
 
     result: dict[str, pd.DataFrame] = {}
     for yf_sym in yf_symbols:

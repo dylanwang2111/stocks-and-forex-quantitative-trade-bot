@@ -255,6 +255,15 @@ class PreScreenAgent:
             logger.warning("PreScreenAgent: no instruments passed — keeping existing UNIVERSE")
             return []
 
+        # If bulk data fetch failed entirely AND no stocks were scored, it's a data outage
+        # (not a genuine market signal). Keep existing universe to avoid wiping stocks.
+        if bulk_failed and not selected_stocks:
+            logger.warning(
+                "PreScreenAgent: bulk data fetch failed and no stocks scored — "
+                "keeping existing UNIVERSE to avoid data-outage universe wipe"
+            )
+            return []
+
         logger.info(
             "PreScreenAgent selected %d: stocks=[%s] crypto=[%s]",
             len(selected),

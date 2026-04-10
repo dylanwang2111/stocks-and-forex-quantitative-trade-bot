@@ -240,9 +240,9 @@ class Scanner:
                     )
                     continue
             # Volume confirmation for stocks: require above-average volume on entry
-            if r.volume_ratio is not None and r.volume_ratio < 1.0:
+            if r.volume_ratio is not None and r.volume_ratio < 0.5:
                 logger.debug(
-                    "_filter_tradeable: %s skipped — volume_ratio=%.2f below 1.0",
+                    "_filter_tradeable: %s skipped — volume_ratio=%.2f below 0.5",
                     r.symbol, r.volume_ratio,
                 )
                 continue
@@ -293,10 +293,14 @@ class Scanner:
         except Exception:
             logger.debug("scan: failed to fetch %s [1d] — proceeding without", symbol)
 
-        # Validate we actually got data
-        if not dfs or any(df.empty for df in dfs.values()):
+        # Validate we actually got required data (5m, 15m, 1h); 1d is optional
+        required_tfs = ("5m", "15m", "1h")
+        if not dfs or any(dfs.get(tf, pd.DataFrame()).empty for tf in required_tfs):
             logger.warning("scan: empty data for %s — skipping", symbol)
             return None
+        # Remove 1d from dfs if it's empty (fail-open: don't skip symbol for missing daily data)
+        if "1d" in dfs and dfs["1d"].empty:
+            del dfs["1d"]
 
         # Step 4: Regime detection on 1h data
         try:

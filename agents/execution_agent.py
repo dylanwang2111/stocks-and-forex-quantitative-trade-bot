@@ -235,9 +235,18 @@ class ExecutionAgent:
         """
         symbol = position.symbol
         try:
-            instrument = get_instrument(symbol)
+            try:
+                instrument = get_instrument(symbol)
+                asset_type = instrument.asset_type
+            except KeyError:
+                # Symbol removed from universe (e.g. legacy forex pair) — infer from broker
+                asset_type = "stock" if position.broker == "ibkr" else "crypto"
+                logger.warning(
+                    "close_position: %s not in instrument registry — inferring asset_type='%s' from broker='%s'",
+                    symbol, asset_type, position.broker,
+                )
 
-            if instrument.asset_type == "stock":
+            if asset_type == "stock":
                 result = self._close_ibkr_position(position, reason, fill_price)
             else:
                 result = self._close_oanda_position(position, reason, fill_price)
