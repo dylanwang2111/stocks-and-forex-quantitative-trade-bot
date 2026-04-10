@@ -254,7 +254,7 @@ function scoreClass(s) {
   if (s == null) return 'score-low';
   if (s >= 75) return 'score-high';
   if (s >= 65) return 'score-mid';
-  if (s >= 55) return 'score-entry';
+  if (s >= 62) return 'score-entry';
   return 'score-low';
 }
 
