@@ -12,9 +12,9 @@ import pandas_ta as ta
 from signals import SignalResult
 
 
-RSI_OVERSOLD  = 35
-RSI_OVERBOUGHT = 65
-STOCH_OVERSOLD  = 20
+RSI_OVERSOLD   = 35
+RSI_OVERBOUGHT = 75   # raised from 65 — RSI 65-74 is healthy bull momentum, not a short signal
+STOCH_OVERSOLD   = 20
 STOCH_OVERBOUGHT = 80
 
 

@@ -24,11 +24,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
 from agents.confidence_scorer import ConfidenceResult, ConfidenceScorer
 from agents.signal_engine import SignalBundle, SignalEngine
+from agents.portfolio_agent import _SECTOR, _fetch_macro_context_shared, MacroContext
 from data.fetcher import fetch_candles
 from database.models import SignalLog, get_session
 from events.event_guard import EventGuard
@@ -38,6 +40,10 @@ from portfolio.state import PortfolioStateManager
 from portfolio.watchlist import get_universe_snapshot, Instrument
 from regime.detector import RegimeContext, RegimeDetector
 from resilience.correlation_guard import CorrelationGuard
+
+# How long (seconds) to cache the macro context between refreshes.
+# 4 h matches PortfolioAgent's selection cadence — USO EMA trend doesn't change minute-to-minute.
+_MACRO_CACHE_TTL = 4 * 3600
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +68,8 @@ class ScanResult:
     current_price: Optional[float] = None  # cached close price from 1h data
     volume_ratio: Optional[float] = None   # current vol / 20-bar avg vol — stock entry gate
     ema50_1d: Optional[float] = None       # EMA50 from 1d data — daily trend alignment filter
+    adx: Optional[float] = None            # ADX(14) from 1h — trend quality gate
+    asset_type: str = "stock"              # "stock" | "crypto" — drives ADX threshold
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +115,10 @@ class Scanner:
         self._engine = SignalEngine()
         self._scorer = ConfidenceScorer()
         self._regime_detector = RegimeDetector()
+
+        # Macro context cache — refreshed at most every _MACRO_CACHE_TTL seconds
+        self._macro_ctx: Optional[MacroContext] = None
+        self._macro_fetched_at: Optional[datetime] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -246,9 +258,60 @@ class Scanner:
                     r.symbol, r.volume_ratio,
                 )
                 continue
+            # ADX quality gate: require directional trend before entry (crypto>25, stocks>20)
+            if r.adx is not None:
+                adx_min = 25.0 if r.asset_type == "crypto" else 20.0
+                if r.adx < adx_min:
+                    logger.debug(
+                        "_filter_tradeable: %s skipped — ADX=%.1f < %.1f (%s threshold)",
+                        r.symbol, r.adx, adx_min, r.asset_type,
+                    )
+                    continue
+            # Macro oil gate: block energy stock longs when oil is in downtrend
+            sector = _SECTOR.get(r.symbol, "")
+            if sector == "energy":
+                macro = self._get_macro_context()
+                if macro is not None:
+                    if direction == "long" and not macro.oil_uptrend:
+                        logger.debug(
+                            "_filter_tradeable: %s skipped — energy long blocked, oil downtrend",
+                            r.symbol,
+                        )
+                        continue
+                    if direction == "short" and macro.oil_uptrend:
+                        logger.debug(
+                            "_filter_tradeable: %s skipped — energy short blocked, oil uptrend",
+                            r.symbol,
+                        )
+                        continue
             candidates.append(r)
         candidates.sort(key=lambda r: r.confidence_result.dominant_score, reverse=True)
         return candidates
+
+    def _get_macro_context(self) -> Optional[MacroContext]:
+        """
+        Return a cached MacroContext, refreshing at most every _MACRO_CACHE_TTL seconds.
+        Returns None (neutral / allow all) on fetch failure so gates fail open.
+        """
+        now = datetime.utcnow()
+        stale = (
+            self._macro_ctx is None
+            or self._macro_fetched_at is None
+            or (now - self._macro_fetched_at).total_seconds() > _MACRO_CACHE_TTL
+        )
+        if stale:
+            try:
+                self._macro_ctx = _fetch_macro_context_shared()
+                self._macro_fetched_at = now
+                logger.info(
+                    "scanner: macro context refreshed — oil_uptrend=%s gold_uptrend=%s vix=%.1f",
+                    self._macro_ctx.oil_uptrend,
+                    self._macro_ctx.gold_uptrend,
+                    self._macro_ctx.vix,
+                )
+            except Exception:
+                logger.warning("scanner: macro context fetch failed — using stale/neutral", exc_info=True)
+        return self._macro_ctx
 
     # ------------------------------------------------------------------
     # Internal per-symbol logic
@@ -353,6 +416,24 @@ class Scanner:
         except Exception:
             logger.debug("scan: EMA50(1d) failed for %s", symbol)
 
+        # ADX(14) from 1h: trend quality gate — crypto>25, stocks>20
+        adx_val: Optional[float] = None
+        try:
+            df_1h = dfs["1h"]
+            if len(df_1h) >= 14:
+                adx_df = ta.adx(
+                    df_1h["high"].astype(np.float64),
+                    df_1h["low"].astype(np.float64),
+                    df_1h["close"].astype(np.float64),
+                    length=14,
+                )
+                if adx_df is not None and not adx_df.empty:
+                    adx_col = [c for c in adx_df.columns if c.startswith("ADX_")]
+                    if adx_col and pd.notna(adx_df[adx_col[0]].iloc[-1]):
+                        adx_val = float(adx_df[adx_col[0]].iloc[-1])
+        except Exception:
+            logger.debug("scan: ADX computation failed for %s", symbol)
+
         # Step 5: Signal engine
         try:
             bundle: SignalBundle = self._engine.evaluate(symbol, dfs)
@@ -452,6 +533,8 @@ class Scanner:
             current_price=current_price_val,
             volume_ratio=volume_ratio_val,
             ema50_1d=ema50_1d_val,
+            adx=adx_val,
+            asset_type=instrument.asset_type,
         )
 
     # ------------------------------------------------------------------
