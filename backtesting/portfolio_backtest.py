@@ -55,6 +55,15 @@ _ASSET_TYPE: dict[str, str] = {
     inst.symbol: inst.asset_type for inst in UNIVERSE
 }
 
+# Sector tags for macro context gating (mirrors portfolio_agent._SECTOR)
+_SECTOR: dict[str, str] = {
+    "XOM": "energy", "CVX": "energy", "COP": "energy",
+    "OXY": "energy", "SLB": "energy", "HAL": "energy",
+    "MPC": "energy", "VLO": "energy", "XLE": "energy",
+    "GLD": "gold",   "GOLD": "gold",  "NEM": "gold",
+    "GDX": "gold",   "GDXJ": "gold",
+}
+
 # Short entry requires a higher confidence threshold than long entry
 # to compensate for the additional risk (unlimited upside for the stock)
 _SHORT_THRESHOLD_PREMIUM = 5.0   # e.g. if long threshold=55, short threshold=60
@@ -163,7 +172,8 @@ class PortfolioBacktestRunner:
         score_data = self._compute_all_scores(symbols, prefetched_dfs, start, end)
         if score_data.empty:
             return self._empty_result(symbols, start, end)
-        return self._simulate(symbols, prefetched_dfs, score_data, start, end)
+        macro_ctx = self._build_macro_context(prefetched_dfs, start, end)
+        return self._simulate(symbols, prefetched_dfs, score_data, start, end, macro_ctx)
 
     # ── Signal scoring ─────────────────────────────────────────────────────────
 
@@ -183,14 +193,16 @@ class PortfolioBacktestRunner:
             df = dfs.get(sym)
             if df is None or df.empty or len(df) < 210:
                 continue
-            score_s, dir_s, atr_s, regime_s, ema200_s, roll_high_s, roll_low_s = self._score_series(df)
+            score_s, dir_s, atr_s, regime_s, ema200_s, ema50_s, roll_high_s, roll_low_s, adx_s = self._score_series(df)
             frames[f"{sym}_score"]     = score_s.loc[start:end]
             frames[f"{sym}_dir"]       = dir_s.loc[start:end]
             frames[f"{sym}_atr"]       = atr_s.loc[start:end]
             frames[f"{sym}_regime"]    = regime_s.loc[start:end]
             frames[f"{sym}_ema200"]    = ema200_s.loc[start:end]
+            frames[f"{sym}_ema50"]     = ema50_s.loc[start:end]
             frames[f"{sym}_roll_high"] = roll_high_s.loc[start:end]
             frames[f"{sym}_roll_low"]  = roll_low_s.loc[start:end]
+            frames[f"{sym}_adx"]       = adx_s.loc[start:end]
 
         if not frames:
             return pd.DataFrame()
@@ -263,6 +275,15 @@ class PortfolioBacktestRunner:
             obv_fast = pd.Series(0.0, index=close.index)
             obv_slow = pd.Series(0.0, index=close.index)
 
+        # ADX(14) — trend quality filter: only enter when a trend is present
+        adx_df = ta.adx(df["high"].astype(np.float64), df["low"].astype(np.float64),
+                        close.astype(np.float64), length=14)
+        if adx_df is not None:
+            adx_col = [c for c in adx_df.columns if c.startswith("ADX_")][0]
+            adx_s = adx_df[adx_col]
+        else:
+            adx_s = pd.Series(25.0, index=close.index)  # neutral fallback
+
         # ── Output series ─────────────────────────────────────────────────────
         scores     = pd.Series(0.0, index=close.index)
         directions = pd.Series(0,   index=close.index, dtype=int)
@@ -296,9 +317,13 @@ class PortfolioBacktestRunner:
                 votes["cat2"] = 0
 
             # ── cat3: RSI momentum (tighter 45/55 deadband, less noise) ──────
+            # Overbought cap: RSI > 75 returns 0 (not +1) — avoids entering at
+            # momentum extremes where reversal risk is high (e.g., TSLA Jan 2022
+            # at RSI=85 just before the crash).
             if pd.notna(rsi.iloc[i]):
                 rsi_val = float(rsi.iloc[i])
-                votes["cat3"] = 1 if rsi_val > 55 else (-1 if rsi_val < 45 else 0)
+                votes["cat3"] = (1 if 55 < rsi_val < 75 else
+                                 (-1 if rsi_val < 45 else 0))
             else:
                 votes["cat3"] = 0
 
@@ -357,19 +382,87 @@ class PortfolioBacktestRunner:
             regime_s.iloc[i] = regime
 
             direction, score = self.scorer.simple_signal(votes, self.threshold)
+
             scores.iloc[i]     = score if direction != 0 else 0.0
             directions.iloc[i] = direction
 
-        # ── EMA200 and 52-week proximity filter columns ────────────────────────
+        # ── EMA200, EMA50 and 52-week proximity filter columns ───────────────────
         ema200_s   = pd.Series(np.nan, index=close.index)
+        ema50_s    = pd.Series(np.nan, index=close.index)
         # Rolling 252-day high/low for 52-week proximity filter
         roll_high  = close.rolling(252, min_periods=20).max()
         roll_low   = close.rolling(252, min_periods=20).min()
+        for i in range(50, len(df)):
+            if pd.notna(ema50.iloc[i]):
+                ema50_s.iloc[i] = float(ema50.iloc[i])
         for i in range(200, len(df)):
             if pd.notna(ema200.iloc[i]):
                 ema200_s.iloc[i] = float(ema200.iloc[i])
 
-        return scores, directions, atr_series, regime_s, ema200_s, roll_high, roll_low
+        # adx_s already computed above — returned for per-asset-type gate in _simulate
+        return scores, directions, atr_series, regime_s, ema200_s, ema50_s, roll_high, roll_low, adx_s
+
+    # ── Macro context (sector trend gates) ────────────────────────────────────
+
+    def _build_macro_context(
+        self,
+        prefetched_dfs: dict[str, pd.DataFrame],
+        start: str,
+        end: str,
+    ) -> dict[str, pd.Series]:
+        """
+        Build a dict of {macro_key: pd.Series[bool]} for sector trend gates.
+
+        Currently computes:
+          "oil_uptrend" — USO EMA20 > EMA60 (mirrors live MacroContext.oil_uptrend)
+
+        Uses "USO" from prefetched_dfs if available, otherwise tries yfinance.
+        Falls back to all-True (neutral / allow all) if data unavailable.
+
+        Returns a dict so future macro signals (gold_uptrend, vix_stress) can
+        be added without changing the _simulate signature.
+        """
+        import pandas_ta as _ta
+        import pandas as _pd
+
+        # ── Fetch USO ─────────────────────────────────────────────────────
+        uso_df = prefetched_dfs.get("USO")
+        if uso_df is None or uso_df.empty:
+            try:
+                import yfinance as yf
+                # Fetch with extra warmup (60 bars) so EMAs are warm at start
+                import datetime
+                fetch_dt = datetime.date.fromisoformat(start) - datetime.timedelta(days=120)
+                uso_raw = yf.download(
+                    "USO",
+                    start=fetch_dt.strftime("%Y-%m-%d"),
+                    end=end,
+                    interval="1d",
+                    auto_adjust=True,
+                    progress=False,
+                )
+                if uso_raw is not None and not uso_raw.empty:
+                    uso_raw.columns = [c.lower() for c in uso_raw.columns]
+                    if uso_raw.index.tz is None:
+                        uso_raw.index = uso_raw.index.tz_localize("UTC")
+                    else:
+                        uso_raw.index = uso_raw.index.tz_convert("UTC")
+                    uso_df = uso_raw
+            except Exception:
+                uso_df = None
+
+        result: dict[str, pd.Series] = {}
+
+        if uso_df is not None and not uso_df.empty and "close" in uso_df.columns:
+            close = uso_df["close"].dropna()
+            ema_fast = _ta.ema(close, length=20)
+            ema_slow = _ta.ema(close, length=60)
+            if ema_fast is not None and ema_slow is not None:
+                oil_up = (ema_fast > ema_slow).reindex(close.index).fillna(False)
+                result["oil_uptrend"] = oil_up
+        # If fetch failed, "oil_uptrend" key absent → _simulate defaults to True (allow)
+
+        return result
 
     # ── Portfolio simulation ───────────────────────────────────────────────────
 
@@ -380,7 +473,10 @@ class PortfolioBacktestRunner:
         score_data: pd.DataFrame,
         start: str,
         end: str,
+        macro_ctx: "dict[str, pd.Series] | None" = None,
     ) -> PortfolioResult:
+        if macro_ctx is None:
+            macro_ctx = {}
         # Build aligned OHLC matrices
         close_frames, high_frames, low_frames = {}, {}, {}
         for sym in symbols:
@@ -435,17 +531,29 @@ class PortfolioBacktestRunner:
                 roll_low_col  = f"{sym}_roll_low"
                 if score_col not in score_data.columns:
                     continue
+                adx_col    = f"{sym}_adx"
                 score      = float(score_data.loc[date, score_col])       if date in score_data.index else 0.0
                 direction  = int(score_data.loc[date, dir_col])            if date in score_data.index else 0
                 regime     = int(score_data.loc[date, regime_col])         if regime_col     in score_data.columns and date in score_data.index else 1
                 ema200_val = float(score_data.loc[date, ema200_col])       if ema200_col     in score_data.columns and date in score_data.index else np.nan
                 roll_high  = float(score_data.loc[date, roll_high_col])    if roll_high_col  in score_data.columns and date in score_data.index else np.nan
                 roll_low   = float(score_data.loc[date, roll_low_col])     if roll_low_col   in score_data.columns and date in score_data.index else np.nan
+                adx_val    = float(score_data.loc[date, adx_col])          if adx_col        in score_data.columns and date in score_data.index else 25.0
 
                 close_now = row.get(sym)
                 close_now = float(close_now) if close_now is not None and pd.notna(close_now) else None
 
-                # Long filter: close > EMA200 AND within 15% of 52-week high
+                # ADX quality gate: require minimum trend strength before entry.
+                # Crypto uses a higher bar (> 25) — BTC/ETH generate many false
+                # EMA crossovers in sideways markets. Stocks use a soft floor (> 20)
+                # to filter true sideways chop while allowing moderate-trend entries
+                # (e.g., QQQ/TSLA momentum trades have ADX 22-35).
+                asset_type_now = _ASSET_TYPE.get(sym, "stock")
+                adx_min = 25.0 if asset_type_now == "crypto" else 20.0
+                if adx_val < adx_min:
+                    continue
+
+                # Long filter: close > EMA200 AND within 8% of 52-week high
                 # (avoids longs on mean-reversion bounces in declining sectors;
                 #  only trades instruments in confirmed uptrends near recent highs)
                 _HIGH_PROXIMITY = 0.92   # close must be > 92% of 252-day high (within 8% of year high)
@@ -459,6 +567,27 @@ class PortfolioBacktestRunner:
                                 and close_now < ema200_val)
                 near_52w_low = (close_now is not None and not np.isnan(roll_low)
                                 and roll_low > 0 and close_now < _LOW_PROXIMITY * roll_low)
+
+                # Sector macro gate (mirrors live MacroContext logic):
+                #   Energy stocks: require oil uptrend (USO EMA20 > EMA60) for longs,
+                #   oil downtrend for shorts. Falls through to True if data unavailable.
+                sector = _SECTOR.get(sym, "")
+                oil_up_series = macro_ctx.get("oil_uptrend")
+                oil_uptrend: bool = True   # default: allow (neutral macro)
+                if oil_up_series is not None:
+                    try:
+                        # Find nearest available date ≤ current date
+                        available = oil_up_series.index[oil_up_series.index <= date]
+                        if len(available) > 0:
+                            oil_uptrend = bool(oil_up_series.loc[available[-1]])
+                    except Exception:
+                        pass
+
+                if sector == "energy":
+                    if direction == 1 and not oil_uptrend:
+                        continue   # skip energy long when oil is in downtrend
+                    if direction == -1 and oil_uptrend:
+                        continue   # skip energy short when oil is in uptrend
 
                 if (direction == 1 and regime >= 0 and above_ema200 and near_52w_high
                         and score >= self.threshold):
