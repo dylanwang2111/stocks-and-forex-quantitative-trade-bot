@@ -40,8 +40,8 @@ _ATR_SL_MULT: dict[str, float] = {
     "crypto": 2.0,
 }
 _ATR_TP_MULT: dict[str, float] = {
-    "stock":  6.0,    # R:R 3.0:1 (optimised)
-    "crypto": 6.0,
+    "stock":  4.0,    # R:R 2.0:1 — tighter target improves WR; more realistic for
+    "crypto": 4.0,    # daily-bar proxy (live 15m signals often exit well before 6×ATR)
 }
 # Trailing stop: exit when close pulls back N*ATR from the position's best price
 _ATR_TRAIL_MULT: dict[str, float] = {
