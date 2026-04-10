@@ -254,7 +254,7 @@ function scoreClass(s) {
   if (s == null) return 'score-low';
   if (s >= 75) return 'score-high';
   if (s >= 65) return 'score-mid';
-  if (s >= 62) return 'score-entry';
+  if (s >= 55) return 'score-entry';
   return 'score-low';
 }
 
@@ -718,6 +718,7 @@ async function renderSignals() {
   params.set('days', '5');
   const data = await apiFetch('/api/signals?' + params);
   if (!data) return;
+  const minEntry = data.min_confidence ?? 62;
 
   // Populate symbol filter on first load
   const symSel = document.getElementById('sig-sym-filter');
@@ -760,6 +761,7 @@ async function renderSignals() {
   setText('sdist-mean',      sigMean.toFixed(1));
   setText('sdist-tradeable', pctTrad + '%');
   setText('sdist-top',       topSym ? topSym.sym : '—');
+  setText('sdist-min-entry', minEntry);
 
   // Histogram buckets (step = 5, range 0–100)
   const buckets = {};
@@ -819,6 +821,17 @@ async function renderSignals() {
         ctx.font      = 'bold 8px "IBM Plex Mono", monospace';
         ctx.fillText(t.label, x + 3, top + 11);
       });
+
+      // Min-entry threshold line (solid, distinct colour)
+      const minX = left + (minEntry / 5) * bw;
+      ctx.strokeStyle = 'rgba(196,90,82,0.85)';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath(); ctx.moveTo(minX, top); ctx.lineTo(minX, bottom); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(196,90,82,0.85)';
+      ctx.font      = 'bold 8px "IBM Plex Mono", monospace';
+      ctx.fillText('MIN', minX + 3, top + 22);
       ctx.restore();
     },
   };

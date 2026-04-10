@@ -82,7 +82,7 @@ class BotConfig:
         default_factory=lambda: os.getenv("TRADING_MODE", "paper")
     )
     min_confidence: float = field(
-        default_factory=lambda: float(os.getenv("MIN_CONFIDENCE", "62"))
+        default_factory=lambda: float(os.getenv("MIN_CONFIDENCE", "55"))
     )
     max_positions: int = field(
         default_factory=lambda: int(os.getenv("MAX_POSITIONS", "2"))

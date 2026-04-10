@@ -880,7 +880,12 @@ def api_signals(
             })
 
         all_syms = sorted({s.symbol for s in rows if s.symbol})
-        return {"signals": signals, "total": len(signals), "symbols": all_syms}
+        return {
+            "signals": signals,
+            "total": len(signals),
+            "symbols": all_syms,
+            "min_confidence": settings.bot.min_confidence,
+        }
     except Exception as exc:
         logger.exception("API error"); return JSONResponse({"error": "Internal server error"}, status_code=500)
 
