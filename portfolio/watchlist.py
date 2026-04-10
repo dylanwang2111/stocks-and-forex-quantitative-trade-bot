@@ -26,17 +26,6 @@ class Instrument:
 # ── Universe ───────────────────────────────────────────────────────────────────
 UNIVERSE: list[Instrument] = [
     Instrument(
-        symbol="SPY",
-        broker="ibkr",
-        asset_type="stock",
-        yf_symbol="SPY",
-        active_hours_utc="13:30–20:00",
-        slippage_pct=0.0005,   # tight spread ETF
-        min_position_usd=10.0,
-        correlated_with=["QQQ"],
-        notes="S&P 500 ETF. Never hold with QQQ simultaneously (0.95 corr).",
-    ),
-    Instrument(
         symbol="QQQ",
         broker="ibkr",
         asset_type="stock",
@@ -70,20 +59,14 @@ UNIVERSE: list[Instrument] = [
         notes="High volatility / momentum stock. Fractional shares on IBKR.",
     ),
     Instrument(
-        symbol="XOM",  
-        broker="ibkr", 
-        asset_type="stock", 
+        symbol="XOM",
+        broker="ibkr",
+        asset_type="stock",
         yf_symbol="XOM",
-        active_hours_utc="13:30–20:00", 
-        slippage_pct=0.0006, 
+        active_hours_utc="13:30–20:00",
+        slippage_pct=0.0006,
         min_position_usd=10.0,
         notes="ExxonMobil. Integrated major."),
-    Instrument(symbol="CVX",  broker="ibkr", asset_type="stock", yf_symbol="CVX",
-               active_hours_utc="13:30–20:00", slippage_pct=0.0007, min_position_usd=10.0,
-               notes="Chevron. Integrated major."),
-    Instrument(symbol="GOLD",  broker="ibkr", asset_type="stock", yf_symbol="GOLD",
-               active_hours_utc="13:30–20:00", slippage_pct=0.0008, min_position_usd=10.0,
-               notes="Barrick Gold. World's largest gold miner."),
     Instrument(
         symbol="BTCUSD",
         broker="oanda",

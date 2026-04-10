@@ -40,13 +40,13 @@ _ATR_SL_MULT: dict[str, float] = {
     "crypto": 2.0,
 }
 _ATR_TP_MULT: dict[str, float] = {
-    "stock":  4.0,    # R:R 2.0:1
-    "crypto": 4.0,
+    "stock":  6.0,    # R:R 3.0:1 (optimised)
+    "crypto": 6.0,
 }
 # Trailing stop: exit when close pulls back N*ATR from the position's best price
 _ATR_TRAIL_MULT: dict[str, float] = {
-    "stock":  1.5,
-    "crypto": 1.5,
+    "stock":  2.0,
+    "crypto": 2.0,
 }
 _FALLBACK_SL: dict[str, float] = {"stock": 0.015, "crypto": 0.015}
 _FALLBACK_TP: dict[str, float] = {"stock": 0.030, "crypto": 0.030}
