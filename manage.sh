@@ -118,6 +118,10 @@ case "$1" in
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Bot not running — restarting..." >> "$BOT_DIR/logs/watchdog.log"
         start_bot
     fi
+    if ! is_running "$DASH_PIDFILE"; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Dashboard not running — restarting..." >> "$BOT_DIR/logs/watchdog.log"
+        start_dashboard
+    fi
     ;;
   *)
     echo "Usage: $0 {start|stop|restart|status|watchdog} [bot|dashboard]"

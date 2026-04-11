@@ -9,7 +9,7 @@ Scoring system:
   - Regime multipliers applied per-category BEFORE summing
   - Score mapped to 0–100 range
   - Min 10-point lead gap between bull/bear required for directional trade
-  - SMALL tier starts at 55 to match backtest entry threshold
+  - SMALL tier starts at 55; entry floor enforced separately via MIN_CONFIDENCE
 """
 from __future__ import annotations
 
