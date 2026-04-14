@@ -1,11 +1,14 @@
 # Data
-yfinance==0.2.54
+yfinance==0.2.61
+frozendict>=2.4.0
+multitasking>=0.0.7
+peewee>=3.16.2
 pandas==2.3.2
 numpy==2.2.6
 
 # Technical Analysis
-pandas-ta==0.4.71b0
-TA-Lib>=0.4.0
+# pandas-ta 0.4.x requires Python >=3.12; a pure-pandas shim (pandas_ta.py)
+# is bundled in the project root and takes precedence at import time.
 
 # Backtesting — uses pure-pandas fallback (vectorbt incompatible with numpy>=2)
 
@@ -24,7 +27,8 @@ ib_insync==0.9.86
 oandapyV20==0.7.2
 
 # Scheduler
-APScheduler==3.10.4
+APScheduler==3.11.2
+tzlocal>=5.0
 
 # Statistics
 scipy==1.15.2
