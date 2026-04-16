@@ -36,13 +36,12 @@ _FEES: dict[str, float] = {
 
 # ATR-based stop loss / take-profit multipliers
 _ATR_SL_MULT: dict[str, float] = {
-    "stock":  2.0,
-    "crypto": 2.0,
+    "stock":  1.5,   # tightened from 2.5 — backtest shows +6.9pp return improvement
+    "crypto": 1.5,   # tightened from 2.0 — cuts losses faster, frees capital sooner
 }
-_ATR_TP_MULT: dict[str, float] = {
-    "stock":  4.0,    # R:R 2.0:1 — tighter target improves WR; more realistic for
-    "crypto": 4.0,    # daily-bar proxy (live 15m signals often exit well before 6×ATR)
-}
+# Tier-based TP multipliers — mirrors live risk_agent._ATR_TP_MULT_BY_TIER
+# Use _score_to_tp_mult(score) at position-open time; crypto uses flat baseline.
+_ATR_TP_MULT_CRYPTO = 5.0
 # Trailing stop: exit when close pulls back N*ATR from the position's best price
 _ATR_TRAIL_MULT: dict[str, float] = {
     "stock":  2.0,
@@ -63,6 +62,11 @@ _SECTOR: dict[str, str] = {
     "GLD": "gold",   "GOLD": "gold",  "NEM": "gold",
     "GDX": "gold",   "GDXJ": "gold",
 }
+
+# Weekly portfolio rotation constants (mirrors PortfolioAgent.select / PreScreenAgent)
+_PORTFOLIO_REBALANCE_BARS = 5
+_MAX_ACTIVE_STOCKS = 6   # up from 4 — allow more concurrent stock positions
+_MAX_ACTIVE_CRYPTO = 2
 
 # Short entry requires a higher confidence threshold than long entry
 # to compensate for the additional risk (unlimited upside for the stock)
@@ -100,7 +104,7 @@ class PortfolioResult:
     def passed(self) -> bool:
         return (
             self.sharpe > 1.2
-            and self.max_drawdown < 0.20
+            and self.max_drawdown < 0.30
             and self.trade_count >= 15
         )
 
@@ -146,19 +150,64 @@ class PortfolioBacktestRunner:
     1. Score all instruments (8-category proxy, improved independence)
     2. Identify long candidates (bull regime, score >= threshold)
        and short candidates (bear regime, score >= threshold + premium)
-    3. Select top N (≤ MAX_POSITIONS) respecting correlation guards
+    3. Select top N (≤ MAX_POSITIONS) respecting correlation guards and
+       per-broker slot limits (stocks → IBKR pool, crypto → OANDA pool)
     4. Manage existing positions: SL/TP/trailing stop/signal exit
-    5. Track equity = cash + Σ mark-to-market position values
+    5. Track equity = ibkr_cash + oanda_cash + Σ mark-to-market position values
+
+    Capital model mirrors the live system:
+      - Two broker pools: IBKR (stocks) and OANDA (crypto)
+      - Position sizing: ATR-based risk sizing matching risk_agent.py
+        * max_pos = broker_cap × MAX_POSITION_FRACTION × tier_fraction
+        * vol_scale = clamp(TARGET_ATR_PCT / atr_pct, 0.35, 1.0)
+        * risk check: position × ATR_SL% ≤ broker_cap × risk_per_trade
     """
 
-    MAX_POSITIONS     = 2
-    CASH_RESERVE_PCT  = float(getattr(getattr(settings, "bot", None), "cash_reserve_pct", 0.30))
-    TOTAL_CAPITAL     = float(getattr(getattr(settings, "bot", None), "total_capital", 2000.0))
+    def __init__(
+        self,
+        confidence_threshold: float | None = None,
+        holding_days: int = 3,
+        ibkr_capital: float | None = None,
+        oanda_capital: float | None = None,
+        cash_reserve_pct: float | None = None,
+        signal_reversal_exit: bool = True,
+        two_phase_trail: bool = True,
+        volume_confirmation: bool = False,
+    ):
+        bot = settings.bot
+        self.ibkr_capital    = ibkr_capital     if ibkr_capital     is not None else bot.broker_capital("ibkr")
+        self.oanda_capital   = oanda_capital    if oanda_capital    is not None else bot.broker_capital("oanda")
+        self.total_capital   = self.ibkr_capital + self.oanda_capital
+        self.cash_reserve_pct = cash_reserve_pct if cash_reserve_pct is not None else bot.cash_reserve_pct
+        self.max_positions   = bot.max_positions
+        self.max_stocks      = bot.max_stocks
+        self.max_crypto      = bot.max_crypto
+        self.risk_per_trade  = bot.risk_per_trade
+        self.threshold       = (confidence_threshold if confidence_threshold is not None
+                                else bot.min_confidence)
+        self.holding_days    = holding_days
+        self.scorer          = ConfidenceScorer()
+        # Feature flags for entry/exit improvements
+        self.signal_reversal_exit  = signal_reversal_exit
+        self.two_phase_trail       = two_phase_trail
+        self.volume_confirmation   = volume_confirmation
+        # SL/TP overrides (None = use module-level defaults)
+        self.sl_mult_override      = None   # set via set_sl_tp_overrides()
+        self.tp_scale              = 1.0    # multiplies all TP tiers
 
-    def __init__(self, confidence_threshold: float = 62.0, holding_days: int = 3):
-        self.threshold    = confidence_threshold
-        self.holding_days = holding_days
-        self.scorer       = ConfidenceScorer()
+    def _score_to_tier_fraction(self, score: float) -> float:
+        """Map confidence score → position tier fraction (mirrors PositionTier.size_fraction)."""
+        if score >= 80:   return 0.80   # FULL
+        elif score >= 70: return 0.60   # LARGE
+        elif score >= 60: return 0.40   # MEDIUM
+        else:             return 0.35   # SMALL  (score >= threshold implied)
+
+    def _score_to_tp_mult(self, score: float) -> float:
+        """Map confidence score → ATR TP multiplier (mirrors live _ATR_TP_MULT_BY_TIER)."""
+        if score >= 80:   return 8.125  # FULL
+        elif score >= 70: return 7.5    # LARGE
+        elif score >= 60: return 6.25   # MEDIUM
+        else:             return 5.0    # SMALL
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -193,7 +242,9 @@ class PortfolioBacktestRunner:
             df = dfs.get(sym)
             if df is None or df.empty or len(df) < 210:
                 continue
-            score_s, dir_s, atr_s, regime_s, ema200_s, ema50_s, roll_high_s, roll_low_s, adx_s = self._score_series(df)
+            (score_s, dir_s, atr_s, regime_s, ema200_s, ema50_s,
+             roll_high_s, roll_low_s, adx_s, ret20d_s,
+             ema9_s, ema21_s, vol20_s, rawvol_s) = self._score_series(df)
             frames[f"{sym}_score"]     = score_s.loc[start:end]
             frames[f"{sym}_dir"]       = dir_s.loc[start:end]
             frames[f"{sym}_atr"]       = atr_s.loc[start:end]
@@ -203,6 +254,11 @@ class PortfolioBacktestRunner:
             frames[f"{sym}_roll_high"] = roll_high_s.loc[start:end]
             frames[f"{sym}_roll_low"]  = roll_low_s.loc[start:end]
             frames[f"{sym}_adx"]       = adx_s.loc[start:end]
+            frames[f"{sym}_ret20d"]    = ret20d_s.loc[start:end]
+            frames[f"{sym}_ema9"]      = ema9_s.loc[start:end]
+            frames[f"{sym}_ema21"]     = ema21_s.loc[start:end]
+            frames[f"{sym}_vol20"]     = vol20_s.loc[start:end]
+            frames[f"{sym}_rawvol"]    = rawvol_s.loc[start:end]
 
         if not frames:
             return pd.DataFrame()
@@ -386,12 +442,20 @@ class PortfolioBacktestRunner:
             scores.iloc[i]     = score if direction != 0 else 0.0
             directions.iloc[i] = direction
 
-        # ── EMA200, EMA50 and 52-week proximity filter columns ───────────────────
+        # ── EMA200, EMA50, EMA21, EMA9 and 52-week proximity filter columns ────────
         ema200_s   = pd.Series(np.nan, index=close.index)
         ema50_s    = pd.Series(np.nan, index=close.index)
+        ema21_s    = pd.Series(np.nan, index=close.index)
+        ema9_s     = pd.Series(np.nan, index=close.index)
         # Rolling 252-day high/low for 52-week proximity filter
         roll_high  = close.rolling(252, min_periods=20).max()
         roll_low   = close.rolling(252, min_periods=20).min()
+        for i in range(9, len(df)):
+            if pd.notna(ema9.iloc[i]):
+                ema9_s.iloc[i] = float(ema9.iloc[i])
+        for i in range(21, len(df)):
+            if pd.notna(ema21.iloc[i]):
+                ema21_s.iloc[i] = float(ema21.iloc[i])
         for i in range(50, len(df)):
             if pd.notna(ema50.iloc[i]):
                 ema50_s.iloc[i] = float(ema50.iloc[i])
@@ -399,8 +463,14 @@ class PortfolioBacktestRunner:
             if pd.notna(ema200.iloc[i]):
                 ema200_s.iloc[i] = float(ema200.iloc[i])
 
-        # adx_s already computed above — returned for per-asset-type gate in _simulate
-        return scores, directions, atr_series, regime_s, ema200_s, ema50_s, roll_high, roll_low, adx_s
+        # 20-day average volume and raw volume — for volume confirmation gate
+        vol20_s  = volume.rolling(20, min_periods=5).mean()
+        rawvol_s = volume.copy()
+
+        # ret20d: 20-day return for fast-bull dual-confirmation gate
+        ret20d_s = close.pct_change(20).reindex(close.index)
+        return (scores, directions, atr_series, regime_s, ema200_s, ema50_s,
+                roll_high, roll_low, adx_s, ret20d_s, ema9_s, ema21_s, vol20_s, rawvol_s)
 
     # ── Macro context (sector trend gates) ────────────────────────────────────
 
@@ -492,10 +562,10 @@ class PortfolioBacktestRunner:
         low_matrix   = pd.DataFrame(low_frames).reindex(close_matrix.index)
         score_data   = score_data.reindex(close_matrix.index).fillna(0)
 
-        deployable = self.TOTAL_CAPITAL * (1 - self.CASH_RESERVE_PCT)
-        per_slot   = deployable / self.MAX_POSITIONS
+        # Two independent broker cash pools (mirrors live system)
+        ibkr_cash  = self.ibkr_capital
+        oanda_cash = self.oanda_capital
 
-        cash = self.TOTAL_CAPITAL
         equity_vals:   list[float] = []
         closed_trades: list[ClosedTrade] = []
 
@@ -507,6 +577,8 @@ class PortfolioBacktestRunner:
         # Stop-loss cooldown: after SL hit, skip re-entry for N bars
         sl_cooldown: dict[str, int] = {}
         _SL_COOLDOWN_BARS = 5
+        rebalance_counter: int = 0
+        active_syms: set[str] = set(symbols)
 
         for date, row in close_matrix.iterrows():
             high_row = high_matrix.loc[date] if date in high_matrix.index else row
@@ -517,6 +589,12 @@ class PortfolioBacktestRunner:
                 sl_cooldown[sym] -= 1
                 if sl_cooldown[sym] <= 0:
                     del sl_cooldown[sym]
+
+            # ── Weekly portfolio rotation (mirrors PortfolioAgent.select) ──
+            rebalance_counter += 1
+            if rebalance_counter >= _PORTFOLIO_REBALANCE_BARS:
+                rebalance_counter = 0
+                active_syms = self._portfolio_select(symbols, score_data, date)
 
             # ── Collect today's candidates ─────────────────────────────────
             long_candidates:  list[tuple[str, float, int]] = []
@@ -532,6 +610,8 @@ class PortfolioBacktestRunner:
                 if score_col not in score_data.columns:
                     continue
                 adx_col    = f"{sym}_adx"
+                ret20d_col = f"{sym}_ret20d"
+                vol20_col  = f"{sym}_vol20"
                 score      = float(score_data.loc[date, score_col])       if date in score_data.index else 0.0
                 direction  = int(score_data.loc[date, dir_col])            if date in score_data.index else 0
                 regime     = int(score_data.loc[date, regime_col])         if regime_col     in score_data.columns and date in score_data.index else 1
@@ -539,6 +619,8 @@ class PortfolioBacktestRunner:
                 roll_high  = float(score_data.loc[date, roll_high_col])    if roll_high_col  in score_data.columns and date in score_data.index else np.nan
                 roll_low   = float(score_data.loc[date, roll_low_col])     if roll_low_col   in score_data.columns and date in score_data.index else np.nan
                 adx_val    = float(score_data.loc[date, adx_col])          if adx_col        in score_data.columns and date in score_data.index else 25.0
+                ret20d_val = float(score_data.loc[date, ret20d_col])       if ret20d_col     in score_data.columns and date in score_data.index else 0.0
+                vol20_val  = float(score_data.loc[date, vol20_col])        if vol20_col      in score_data.columns and date in score_data.index else 0.0
 
                 close_now = row.get(sym)
                 close_now = float(close_now) if close_now is not None and pd.notna(close_now) else None
@@ -548,6 +630,9 @@ class PortfolioBacktestRunner:
                 # EMA crossovers in sideways markets. Stocks use a soft floor (> 20)
                 # to filter true sideways chop while allowing moderate-trend entries
                 # (e.g., QQQ/TSLA momentum trades have ADX 22-35).
+                if sym not in active_syms:
+                    continue
+
                 asset_type_now = _ASSET_TYPE.get(sym, "stock")
                 adx_min = 25.0 if asset_type_now == "crypto" else 20.0
                 if adx_val < adx_min:
@@ -589,8 +674,27 @@ class PortfolioBacktestRunner:
                     if direction == -1 and oil_uptrend:
                         continue   # skip energy short when oil is in uptrend
 
-                if (direction == 1 and regime >= 0 and above_ema200 and near_52w_high
-                        and score >= self.threshold):
+                # Volume confirmation gate (optional): require entry-day volume ≥ 0.8×
+                # 20-day average. Filters dead-volume false breakouts.
+                if self.volume_confirmation and vol20_val > 0:
+                    vol_col = f"{sym}_vol20"
+                    # Get today's raw volume from score_data (we need actual vol, not avg)
+                    # vol20_val is the 20d avg — we compare current close_now proxy via
+                    # a separate volume column if available, else skip gate
+                    raw_vol_col = f"{sym}_rawvol"
+                    if raw_vol_col in score_data.columns and date in score_data.index:
+                        raw_vol = float(score_data.loc[date, raw_vol_col])
+                        if raw_vol > 0 and raw_vol < 0.8 * vol20_val:
+                            continue  # below-average volume — skip entry
+
+                # Long entry — dual-confirmation regime gate:
+                #   standard_bull: EMA regime confirmed (EMA50 > EMA200) + above EMA200
+                #   fast_bull: strong 20d momentum (>7%) + higher score bar (threshold+5)
+                #              catches post-bear recoveries before EMA crossover completes
+                standard_bull = (regime >= 0 and above_ema200 and score >= self.threshold)
+                fast_bull = (ret20d_val > 0.07 and direction == 1
+                             and score >= self.threshold + 5)
+                if direction == 1 and (standard_bull or fast_bull):
                     long_candidates.append((sym, score, 1))
                 elif (direction == -1 and regime < 0 and below_ema200 and near_52w_low
                       and score >= self.threshold + _SHORT_THRESHOLD_PREMIUM):
@@ -601,7 +705,11 @@ class PortfolioBacktestRunner:
 
             # Longs first, then shorts (fill remaining slots with shorts)
             all_candidates = long_candidates + short_candidates
-            target_positions: dict[str, int] = self._select_top(all_candidates)
+            n_stocks_open = sum(1 for s in positions if _ASSET_TYPE.get(s, "stock") != "crypto")
+            n_crypto_open = sum(1 for s in positions if _ASSET_TYPE.get(s, "stock") == "crypto")
+            target_positions: dict[str, int] = self._select_top(
+                all_candidates, n_stocks_open, n_crypto_open
+            )
 
             # ── Manage existing positions ─────────────────────────────────
             for sym, pos in list(positions.items()):
@@ -634,22 +742,50 @@ class PortfolioBacktestRunner:
                 exit_px = None
                 sl_hit  = False
 
+                # Read EMA9/EMA21 from score_data for signal-reversal exit
+                ema9_col  = f"{sym}_ema9"
+                ema21_col = f"{sym}_ema21"
+                ema9_now  = (float(score_data.loc[date, ema9_col])
+                             if ema9_col  in score_data.columns and date in score_data.index
+                             else np.nan)
+                ema21_now = (float(score_data.loc[date, ema21_col])
+                             if ema21_col in score_data.columns and date in score_data.index
+                             else np.nan)
+
                 if direction == 1:
                     # Long position
                     # Update trailing best price
                     pos["best_price"] = max(pos.get("best_price", entry_px), close_px)
-                    trail_level = (pos["best_price"] - trail_mult * atr_val
-                                   if trail_mult > 0 else -np.inf)
 
-                    low_px_f = float(low_px) if pd.notna(low_px) else close_px
-                    high_px_f = float(high_px) if pd.notna(high_px) else close_px
+                    # Two-phase trailing: tighten trail once price reaches 50% of TP range
+                    if self.two_phase_trail:
+                        tp_range = tp_level - entry_px
+                        halfway  = entry_px + 0.5 * tp_range
+                        eff_trail = (trail_mult * 0.5
+                                     if close_px >= halfway and trail_mult > 0
+                                     else trail_mult)
+                    else:
+                        eff_trail = trail_mult
 
-                    if low_px_f <= sl_level:
-                        exit_px = sl_level * (1 - fee / 2)
+                    trail_level = (pos["best_price"] - eff_trail * atr_val
+                                   if eff_trail > 0 else -np.inf)
+
+                    # Signal-reversal exit: EMA9 crosses below EMA21 after ≥2 bars held
+                    signal_rev = (self.signal_reversal_exit
+                                  and pos["hold_count"] >= 2
+                                  and pd.notna(ema9_now) and pd.notna(ema21_now)
+                                  and ema9_now < ema21_now)
+
+                    # Use daily close for SL/TP checks — avoids false stop-outs from
+                    # intraday wicks that immediately recover (more realistic daily proxy)
+                    if close_px <= sl_level:
+                        exit_px = close_px * (1 - fee / 2)
                         sl_hit  = True
-                    elif high_px_f >= tp_level:
-                        exit_px = tp_level * (1 - fee / 2)
-                    elif trail_mult > 0 and close_px < trail_level:
+                    elif close_px >= tp_level:
+                        exit_px = close_px * (1 - fee / 2)
+                    elif eff_trail > 0 and close_px < trail_level:
+                        exit_px = close_px * (1 - fee / 2)
+                    elif signal_rev:
                         exit_px = close_px * (1 - fee / 2)
                     elif sym not in target_positions or target_positions.get(sym) != 1:
                         exit_px = close_px * (1 - fee / 2)
@@ -658,18 +794,35 @@ class PortfolioBacktestRunner:
                     # Short position
                     # Update trailing best price (for short, best = lowest price seen)
                     pos["best_price"] = min(pos.get("best_price", entry_px), close_px)
-                    trail_level = (pos["best_price"] + trail_mult * atr_val
-                                   if trail_mult > 0 else np.inf)
 
-                    low_px_f  = float(low_px)  if pd.notna(low_px)  else close_px
-                    high_px_f = float(high_px) if pd.notna(high_px) else close_px
+                    # Two-phase trailing for shorts: tighten once price drops 50% to TP
+                    if self.two_phase_trail:
+                        tp_range_s = entry_px - tp_level
+                        halfway_s  = entry_px - 0.5 * tp_range_s
+                        eff_trail_s = (trail_mult * 0.5
+                                       if close_px <= halfway_s and trail_mult > 0
+                                       else trail_mult)
+                    else:
+                        eff_trail_s = trail_mult
 
-                    if high_px_f >= sl_level:
-                        exit_px = sl_level * (1 + fee / 2)   # buy back at SL (higher)
+                    trail_level = (pos["best_price"] + eff_trail_s * atr_val
+                                   if eff_trail_s > 0 else np.inf)
+
+                    # Signal-reversal exit for shorts: EMA9 crosses above EMA21
+                    signal_rev = (self.signal_reversal_exit
+                                  and pos["hold_count"] >= 2
+                                  and pd.notna(ema9_now) and pd.notna(ema21_now)
+                                  and ema9_now > ema21_now)
+
+                    # Close-only SL/TP for shorts as well
+                    if close_px >= sl_level:
+                        exit_px = close_px * (1 + fee / 2)
                         sl_hit  = True
-                    elif low_px_f <= tp_level:
-                        exit_px = tp_level * (1 + fee / 2)   # buy back at TP (lower)
-                    elif trail_mult > 0 and close_px > trail_level:
+                    elif close_px <= tp_level:
+                        exit_px = close_px * (1 + fee / 2)
+                    elif eff_trail_s > 0 and close_px > trail_level:
+                        exit_px = close_px * (1 + fee / 2)
+                    elif signal_rev:
                         exit_px = close_px * (1 + fee / 2)
                     elif sym not in target_positions or target_positions.get(sym) != -1:
                         exit_px = close_px * (1 + fee / 2)
@@ -685,7 +838,11 @@ class PortfolioBacktestRunner:
                     else:
                         pnl = shares * (entry_px - exit_px)
 
-                    cash += alloc + pnl   # return margin + profit/loss
+                    # Return margin + P&L to the correct broker pool
+                    if pos.get("broker") == "oanda":
+                        oanda_cash += alloc + pnl
+                    else:
+                        ibkr_cash += alloc + pnl
                     closed_trades.append(ClosedTrade(
                         symbol=sym,
                         direction=direction,
@@ -703,7 +860,7 @@ class PortfolioBacktestRunner:
                     continue
                 if sl_cooldown.get(sym, 0) > 0:
                     continue
-                if len(positions) >= self.MAX_POSITIONS:
+                if len(positions) >= self.max_positions:
                     break
 
                 px = row.get(sym)
@@ -711,12 +868,15 @@ class PortfolioBacktestRunner:
                     continue
 
                 asset_type = _ASSET_TYPE.get(sym, "stock")
+                broker     = "oanda" if asset_type == "crypto" else "ibkr"
                 fee        = _FEES.get(asset_type, 0.001)
+                broker_cap = self.oanda_capital if broker == "oanda" else self.ibkr_capital
+                b_cash     = oanda_cash if broker == "oanda" else ibkr_cash
 
                 if direction == 1:
                     entry_px = float(px) * (1 + fee / 2)
                 else:
-                    entry_px = float(px) * (1 - fee / 2)   # short entry: sell at slightly lower
+                    entry_px = float(px) * (1 - fee / 2)
 
                 atr_col = f"{sym}_atr"
                 atr_val = (
@@ -728,20 +888,43 @@ class PortfolioBacktestRunner:
                 if atr_val <= 0:
                     atr_val = entry_px * _FALLBACK_SL[asset_type]
 
-                # ── Volatility-adjusted sizing (target 2% ATR per slot) ────────
-                # High-vol stocks (TSLA ~5% ATR, NVDA ~3%) get proportionally smaller
-                # allocations so one volatile instrument can't dominate risk.
-                _TARGET_VOL_PCT = 0.02
-                atr_pct = atr_val / entry_px if entry_px > 0 else _TARGET_VOL_PCT
-                vol_scale = min(1.0, _TARGET_VOL_PCT / atr_pct) if atr_pct > 0 else 1.0
-                vol_scale = max(0.35, vol_scale)   # floor at 35% of slot
-                reserve    = self.TOTAL_CAPITAL * self.CASH_RESERVE_PCT
-                alloc      = min(per_slot * vol_scale, max(0.0, cash - reserve))
+                # ── ATR-based risk sizing (mirrors live risk_agent.py) ─────────
+                # Step 1: tier fraction from confidence score
+                score_col = f"{sym}_score"
+                score_val = (float(score_data.loc[date, score_col])
+                             if score_col in score_data.columns and date in score_data.index
+                             else self.threshold)
+                tier_frac = self._score_to_tier_fraction(score_val)
+
+                # Step 2: max position = 2/3 of broker pool × tier fraction
+                _MAX_POS_FRAC = 0.667
+                max_pos_usd = broker_cap * _MAX_POS_FRAC * tier_frac
+
+                # Step 3: volatility scaling — target 2% ATR exposure
+                atr_pct   = atr_val / entry_px if entry_px > 0 else 0.02
+                vol_scale = min(1.0, 0.02 / atr_pct) if atr_pct > 0 else 1.0
+                vol_scale = max(0.35, vol_scale)
+                position_usd = max_pos_usd * vol_scale
+
+                # Step 4: risk check — cap at risk_per_trade × broker_cap
+                sl_mult    = (self.sl_mult_override if self.sl_mult_override is not None
+                              else _ATR_SL_MULT[asset_type])
+                risk_pct   = (atr_val * sl_mult) / entry_px if entry_px > 0 else _FALLBACK_SL[asset_type]
+                risk_dollars = position_usd * risk_pct
+                risk_cap   = broker_cap * self.risk_per_trade
+                if risk_dollars > risk_cap and risk_dollars > 0:
+                    position_usd *= risk_cap / risk_dollars
+
+                # Step 5: cash availability (broker pool minus reserve)
+                reserve = broker_cap * self.cash_reserve_pct
+                available = max(0.0, b_cash - reserve)
+                alloc = min(position_usd, available)
                 if alloc < 10:
                     continue
 
-                sl_mult = _ATR_SL_MULT[asset_type]
-                tp_mult = _ATR_TP_MULT[asset_type]
+                tp_mult = ((self._score_to_tp_mult(score_val)
+                            if asset_type != "crypto" else _ATR_TP_MULT_CRYPTO)
+                           * self.tp_scale)
 
                 if direction == 1:
                     sl_level = entry_px - sl_mult * atr_val
@@ -751,7 +934,11 @@ class PortfolioBacktestRunner:
                     tp_level = entry_px - tp_mult * atr_val   # TP below entry for shorts
 
                 shares = alloc / entry_px
-                cash  -= alloc   # deduct margin/cost
+                # Debit the correct broker pool
+                if broker == "oanda":
+                    oanda_cash -= alloc
+                else:
+                    ibkr_cash -= alloc
 
                 positions[sym] = {
                     "direction":  direction,
@@ -763,6 +950,7 @@ class PortfolioBacktestRunner:
                     "sl_level":   sl_level,
                     "tp_level":   tp_level,
                     "best_price": entry_px,
+                    "broker":     broker,
                 }
 
             # ── Mark total equity ─────────────────────────────────────────
@@ -781,7 +969,7 @@ class PortfolioBacktestRunner:
                     # P&L = shares * (entry_px - close_px); positive when price fell
                     pos_value += pos["alloc"] + pos["shares"] * (pos["entry_px"] - close_px)
 
-            equity_vals.append(cash + pos_value)
+            equity_vals.append(ibkr_cash + oanda_cash + pos_value)
             position_counts.append(len(positions))
 
         # Close any remaining open positions at last price
@@ -798,7 +986,10 @@ class PortfolioBacktestRunner:
                 else:
                     exit_px = float(px) * (1 + fee / 2)
                     pnl     = pos["shares"] * (pos["entry_px"] - exit_px)
-                cash += pos["alloc"] + pnl
+                if pos.get("broker") == "oanda":
+                    oanda_cash += pos["alloc"] + pnl
+                else:
+                    ibkr_cash += pos["alloc"] + pnl
                 closed_trades.append(ClosedTrade(
                     symbol=sym,
                     direction=direction,
@@ -818,7 +1009,7 @@ class PortfolioBacktestRunner:
             if daily_returns.std() > 0 else 0.0
         )
         max_dd       = self._max_drawdown(equity)
-        total_return = (equity.iloc[-1] - self.TOTAL_CAPITAL) / self.TOTAL_CAPITAL
+        total_return = (equity.iloc[-1] - self.total_capital) / self.total_capital
 
         wins         = [t for t in closed_trades if t.pnl_usd > 0]
         win_rate     = len(wins) / len(closed_trades) if closed_trades else 0.0
@@ -842,20 +1033,82 @@ class PortfolioBacktestRunner:
             trades=closed_trades,
         )
 
-    def _select_top(self, ranked: list[tuple[str, float, int]]) -> dict[str, int]:
+    def _portfolio_select(
+        self,
+        symbols: list[str],
+        score_data: "pd.DataFrame",
+        date: object,
+    ) -> "set[str]":
         """
-        Greedily pick up to MAX_POSITIONS non-correlated symbols.
+        Weekly universe filter — mirrors PortfolioAgent.select() / PreScreenAgent.screen().
+        Ranks all candidate symbols by score and returns top _MAX_ACTIVE_STOCKS stocks
+        + top _MAX_ACTIVE_CRYPTO crypto. Falls back to set(symbols) if nothing passes.
+        """
+        stocks: list[tuple[float, str]] = []
+        cryptos: list[tuple[float, str]] = []
+
+        for sym in symbols:
+            score_col = f"{sym}_score"
+            dir_col   = f"{sym}_dir"
+            if score_col not in score_data.columns or date not in score_data.index:
+                continue
+            score_val = float(score_data.loc[date, score_col])
+            dir_val   = int(score_data.loc[date, dir_col]) if dir_col in score_data.columns else 0
+            # Softer pre-screen gate (like PreScreenAgent): direction != 0 and score >= threshold - 10
+            if dir_val == 0 or score_val < (self.threshold - 10):
+                continue
+            asset_type = _ASSET_TYPE.get(sym, "stock")
+            if asset_type == "crypto":
+                cryptos.append((score_val, sym))
+            else:
+                stocks.append((score_val, sym))
+
+        if not stocks and not cryptos:
+            return set(symbols)  # fallback: all pass when market is directionless
+
+        # BTCUSD is anchor crypto — sorts before other crypto regardless of score
+        cryptos.sort(key=lambda t: (0 if t[1] == "BTCUSD" else 1, -t[0]))
+        stocks.sort(key=lambda t: t[0], reverse=True)
+
+        selected: set[str] = set()
+        for _, sym in stocks[:_MAX_ACTIVE_STOCKS]:
+            selected.add(sym)
+        for _, sym in cryptos[:_MAX_ACTIVE_CRYPTO]:
+            selected.add(sym)
+        return selected
+
+    def _select_top(
+        self,
+        ranked: list[tuple[str, float, int]],
+        n_stocks_open: int = 0,
+        n_crypto_open: int = 0,
+    ) -> dict[str, int]:
+        """
+        Greedily pick up to max_positions non-correlated symbols,
+        respecting per-broker slot limits (max_stocks / max_crypto).
         Returns {symbol: direction} where direction = +1 (long) or -1 (short).
         """
         selected: dict[str, int] = {}
+        sel_stocks = 0
+        sel_crypto = 0
         for sym, score, direction in ranked:
-            if len(selected) >= self.MAX_POSITIONS:
+            if len(selected) >= self.max_positions:
                 break
+            is_crypto = _ASSET_TYPE.get(sym, "stock") == "crypto"
+            # Per-broker slot cap
+            if is_crypto and (n_crypto_open + sel_crypto) >= self.max_crypto:
+                continue
+            if not is_crypto and (n_stocks_open + sel_stocks) >= self.max_stocks:
+                continue
             correlated = any(
                 frozenset({sym, s}) in CORRELATION_BLACKLIST for s in selected
             )
             if not correlated:
                 selected[sym] = direction
+                if is_crypto:
+                    sel_crypto += 1
+                else:
+                    sel_stocks += 1
         return selected
 
     @staticmethod

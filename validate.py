@@ -18,6 +18,15 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+# Fixed candidate pool with 10yr+ history for portfolio backtests.
+# Used when --portfolio is active and no --symbol is specified,
+# instead of active_symbols() (which reflects the live runtime universe).
+# SPY excluded — consistently near-zero edge vs QQQ; they are too correlated.
+_BT_CANDIDATE_POOL: list[str] = [
+    "QQQ", "NVDA", "AAPL", "MSFT", "TSLA", "AMZN", "META",
+    "XOM", "XLE", "JPM", "GLD", "BTCUSD", "ETHUSD",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Trade Bot — Backtest Validator")
@@ -52,14 +61,67 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start",
         type=str,
-        default="2020-01-01",
-        help="Backtest start date YYYY-MM-DD (default: 2020-01-01)",
+        default="2015-01-01",
+        help="Backtest start date YYYY-MM-DD (default: 2015-01-01)",
     )
     parser.add_argument(
         "--end",
         type=str,
-        default="2025-03-01",
-        help="Backtest end date YYYY-MM-DD (default: 2025-03-01)",
+        default="2024-12-31",
+        help="Backtest end date YYYY-MM-DD (default: 2024-12-31)",
+    )
+    parser.add_argument(
+        "--ibkr-capital",
+        type=float,
+        default=None,
+        dest="ibkr_capital",
+        help="Override IBKR broker capital for backtest (e.g. 15000.0).",
+    )
+    parser.add_argument(
+        "--oanda-capital",
+        type=float,
+        default=None,
+        dest="oanda_capital",
+        help="Override OANDA broker capital for backtest (e.g. 5000.0).",
+    )
+    parser.add_argument(
+        "--cash-reserve",
+        type=float,
+        default=None,
+        dest="cash_reserve",
+        help="Override cash reserve fraction for backtest (e.g. 0.0 = fully deploy).",
+    )
+    parser.add_argument(
+        "--no-signal-exit",
+        action="store_true",
+        default=False,
+        help="Disable signal-reversal exit (EMA9 cross below EMA21).",
+    )
+    parser.add_argument(
+        "--no-two-phase-trail",
+        action="store_true",
+        default=False,
+        help="Disable two-phase trailing stop (tightens after 50%% of TP reached).",
+    )
+    parser.add_argument(
+        "--volume-confirmation",
+        action="store_true",
+        default=False,
+        help="Require entry-day volume >= 0.8x 20d average (volume confirmation gate).",
+    )
+    parser.add_argument(
+        "--sl-mult",
+        type=float,
+        default=None,
+        dest="sl_mult",
+        help="Override ATR stop-loss multiplier for all assets (e.g. 1.5).",
+    )
+    parser.add_argument(
+        "--tp-scale",
+        type=float,
+        default=1.0,
+        dest="tp_scale",
+        help="Scale factor applied to all TP tiers (e.g. 1.5 = 50%% wider TP).",
     )
     return parser.parse_args()
 
@@ -325,7 +387,11 @@ def run_portfolio_backtest(args: argparse.Namespace, walkforward: bool = False) 
     from backtesting.portfolio_backtest import PortfolioBacktestRunner
     from portfolio.watchlist import active_symbols, UNIVERSE_BY_SYMBOL
 
-    all_syms = [args.symbol.upper()] if args.symbol else active_symbols()
+    if args.symbol:
+        all_syms = [args.symbol.upper()]
+    else:
+        # Use fixed 10yr+ history pool for portfolio mode instead of live active universe
+        all_syms = _BT_CANDIDATE_POOL
     # Daily bar signals are not representative for forex (live bot uses 15m/1h for forex).
     # Exclude forex from the portfolio daily-bar backtest to avoid misleading results.
     symbols = [s for s in all_syms
@@ -336,7 +402,16 @@ def run_portfolio_backtest(args: argparse.Namespace, walkforward: bool = False) 
     runner = PortfolioBacktestRunner(
         confidence_threshold=args.threshold,
         holding_days=args.holding_days,
+        ibkr_capital=args.ibkr_capital,
+        oanda_capital=args.oanda_capital,
+        cash_reserve_pct=args.cash_reserve,
+        signal_reversal_exit=not args.no_signal_exit,
+        two_phase_trail=not args.no_two_phase_trail,
+        volume_confirmation=args.volume_confirmation,
     )
+    if args.sl_mult is not None:
+        runner.sl_mult_override = args.sl_mult
+    runner.tp_scale = args.tp_scale
 
     bt_start = getattr(args, "start", "2020-01-01")
     bt_end   = getattr(args, "end",   "2025-03-01")
