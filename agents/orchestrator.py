@@ -211,7 +211,7 @@ class Orchestrator:
     PDTTracker, and CircuitBreaker into a single 15-minute scan loop.
     """
 
-    SCAN_INTERVAL_MINUTES     = 15
+    SCAN_INTERVAL_MINUTES     = 5
     SNAPSHOT_INTERVAL_MINUTES = 60
     SWING_HOLDING_DAYS        = 7   # fallback only; overridden by settings at init
 
@@ -654,16 +654,20 @@ class Orchestrator:
                         pos.symbol,
                     )
 
-            # Patch the saved snapshot with live prices so the dashboard can
-            # compute unrealized P&L without re-fetching.
+            # True mark-to-market equity: capital + all realised + unrealized
+            equity = settings.bot.total_capital + total_realized + unrealized_pnl
+
+            # Patch the saved snapshot with live prices AND the correct equity
+            # so the dashboard equity curve and header stay in sync with Telegram.
             if price_map:
                 try:
                     self._state.update_snapshot_prices(price_map)
                 except Exception:
                     logger.debug("save_snapshot: price patch failed", exc_info=True)
-
-            # True mark-to-market equity: capital + all realised + unrealized
-            equity = settings.bot.total_capital + total_realized + unrealized_pnl
+            try:
+                self._state.patch_snapshot_equity(round(equity, 2))
+            except Exception:
+                logger.debug("save_snapshot: equity patch failed", exc_info=True)
 
             self._notifier.notify_daily_summary(
                 open_positions=len(positions),

@@ -636,6 +636,27 @@ class PortfolioStateManager:
             "positions_detail": positions_detail,
         }
 
+    def patch_snapshot_equity(self, equity: float) -> None:
+        """Update the most recent snapshot's total_equity with the live mark-to-market value.
+
+        Called after unrealized P&L is computed so the DB snapshot matches Telegram.
+        """
+        session = get_session(self._database_url)
+        try:
+            snap = (
+                session.query(PortfolioSnapshot)
+                .order_by(PortfolioSnapshot.timestamp.desc())
+                .first()
+            )
+            if snap:
+                snap.total_equity = equity
+                session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("patch_snapshot_equity: DB write failed")
+        finally:
+            session.close()
+
     def update_snapshot_prices(self, prices: dict) -> None:
         """Patch the most recent snapshot's positions_detail with current market prices.
 

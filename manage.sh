@@ -15,6 +15,7 @@ set -euo pipefail
 #   ./manage.sh watchdog           — start bot if not running (for cron)
 
 BOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="${PYTHON:-/home/dylannguyen/anaconda3/envs/bmo_venv/bin/python}"
 LOG_FILE="$BOT_DIR/logs/paper_$(date +%Y%m%d).log"
 DASH_LOG="$BOT_DIR/logs/dashboard_$(date +%Y%m%d).log"
 PIDFILE="$BOT_DIR/logs/bot.pid"
@@ -39,7 +40,7 @@ start_bot() {
         return
     fi
     cd "$BOT_DIR" || exit 1
-    nohup python main.py --mode paper >> "$LOG_FILE" 2>&1 &
+    nohup "$PYTHON" main.py --mode paper >> "$LOG_FILE" 2>&1 &
     echo $! > "$PIDFILE"
     echo "Bot started (PID $!), logging to $LOG_FILE"
 }
@@ -59,7 +60,7 @@ start_dashboard() {
         return
     fi
     cd "$BOT_DIR" || exit 1
-    nohup uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 >> "$DASH_LOG" 2>&1 &
+    nohup "$PYTHON" -m uvicorn dashboard_v2:app --host 0.0.0.0 --port 8050 >> "$DASH_LOG" 2>&1 &
     echo $! > "$DASH_PIDFILE"
     echo "Dashboard started (PID $!), logging to $DASH_LOG"
     echo "Open http://localhost:8050"
@@ -76,7 +77,7 @@ stop_dashboard() {
 
 case "$1" in
   start)
-    case "$2" in
+    case "${2:-}" in
       bot)        start_bot ;;
       dashboard)  start_dashboard ;;
       "")         start_bot; start_dashboard ;;
@@ -84,7 +85,7 @@ case "$1" in
     esac
     ;;
   stop)
-    case "$2" in
+    case "${2:-}" in
       bot)        stop_bot ;;
       dashboard)  stop_dashboard ;;
       "")         stop_bot; stop_dashboard ;;
@@ -92,7 +93,7 @@ case "$1" in
     esac
     ;;
   restart)
-    case "$2" in
+    case "${2:-}" in
       bot)        stop_bot;       sleep 1; start_bot ;;
       dashboard)  stop_dashboard; sleep 1; start_dashboard ;;
       "")         stop_bot; stop_dashboard; sleep 1; start_bot; start_dashboard ;;

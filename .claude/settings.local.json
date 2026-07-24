@@ -34,7 +34,17 @@
       "Bash(./manage.sh status:*)",
       "Bash(find /home/dylannguyen/trade-bot-test -type f -name \"*.py\" -exec grep -l \"USD\\\\|usd\\\\|\\\\$\" {} \\\\;)",
       "Bash(grep -rn \"'\\\\$'\\\\|\\\\\"\\\\$\\\\\"\\\\|\\\\\\\\$\" /home/dylannguyen/trade-bot-test/static/)",
-      "Bash(pkill -f dashboard_v2.py)"
+      "Bash(pkill -f dashboard_v2.py)",
+      "Bash(./manage.sh restart:*)",
+      "Bash(echo \"Bot PID: $!\")",
+      "Bash(pkill -f \"python main.py\")",
+      "Bash(xargs -I{} kill -9 {} sleep 3 ps aux)",
+      "Bash(conda run:*)",
+      "Read(//home/dylannguyen/anaconda3/bin/**)",
+      "Read(//home/dylannguyen/miniconda3/**)",
+      "Bash(pip list *)",
+      "Bash(pip index *)",
+      "Bash(pip download *)"
     ]
   }
 }

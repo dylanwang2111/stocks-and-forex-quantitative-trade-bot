@@ -557,8 +557,8 @@ def api_overview():
             "trading_mode": settings.bot.trading_mode,
             "bot_running": bot_running,
             "total_capital": total_capital,
-            # Mark-to-market equity: pool (capital + realized − costs) + open unrealized
-            "current_equity": round(ibkr_pool + oanda_pool + total_unrealized, 2),
+            # Mark-to-market equity: same formula as Telegram — total_capital + realized + unrealized
+            "current_equity": round(total_capital + realized + total_unrealized, 2),
             "realized_pnl": round(realized, 2),
             "unrealized_pnl": total_unrealized,
             "broker_sync": broker_sync_status,
@@ -590,7 +590,7 @@ def api_overview():
                 "total": {
                     "pool": round(ibkr_pool + oanda_pool, 2),
                     "deployed": round(total_dep, 2),
-                    "available": round(max(0.0, ibkr_pool + oanda_pool - total_dep), 2),
+                    "available": round(max(0.0, ibkr_pool + oanda_pool - ibkr_res - oanda_res - total_dep), 2),
                     "utilization_pct": round(total_dep / (ibkr_pool + oanda_pool) * 100, 1) if (ibkr_pool + oanda_pool) else 0,
                     "positions": len(open_trades),
                 },

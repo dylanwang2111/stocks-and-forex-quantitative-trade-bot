@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          # TA-Lib C library not needed (project uses pandas_ta only)
+          pip install -r requirements.txt --ignore-requires-python
+
+      - name: Run orchestrator tests
+        env:
+          IBKR_HOST: "127.0.0.1"
+          IBKR_PORT: "4002"
+          IBKR_CLIENT_ID: "1"
+          IBKR_CAPITAL: "1500"
+          OANDA_API_KEY: "test"
+          OANDA_ACCOUNT_ID: "test"
+          OANDA_CAPITAL: "500"
+          TOTAL_CAPITAL: "2000"
+          RISK_PER_TRADE: "0.01"
+          MIN_CONFIDENCE: "55"
+          MAX_POSITIONS: "10"
+          CASH_RESERVE_PCT: "0"
+          TELEGRAM_BOT_TOKEN: "test"
+          TELEGRAM_CHAT_ID: "test"
+        run: python3 -m agents.orchestrator test
+
+      - name: Run risk agent tests
+        env:
+          IBKR_HOST: "127.0.0.1"
+          IBKR_PORT: "4002"
+          IBKR_CLIENT_ID: "1"
+          IBKR_CAPITAL: "1500"
+          OANDA_API_KEY: "test"
+          OANDA_ACCOUNT_ID: "test"
+          OANDA_CAPITAL: "500"
+          TOTAL_CAPITAL: "2000"
+          RISK_PER_TRADE: "0.01"
+          MIN_CONFIDENCE: "55"
+          MAX_POSITIONS: "10"
+          CASH_RESERVE_PCT: "0"
+          TELEGRAM_BOT_TOKEN: "test"
+          TELEGRAM_CHAT_ID: "test"
+        run: python3 -m agents.risk_agent
+
+      - name: Run scanner tests
+        env:
+          IBKR_HOST: "127.0.0.1"
+          IBKR_PORT: "4002"
+          IBKR_CLIENT_ID: "1"
+          IBKR_CAPITAL: "1500"
+          OANDA_API_KEY: "test"
+          OANDA_ACCOUNT_ID: "test"
+          OANDA_CAPITAL: "500"
+          TOTAL_CAPITAL: "2000"
+          RISK_PER_TRADE: "0.01"
+          MIN_CONFIDENCE: "55"
+          MAX_POSITIONS: "10"
+          CASH_RESERVE_PCT: "0"
+          TELEGRAM_BOT_TOKEN: "test"
+          TELEGRAM_CHAT_ID: "test"
+        run: python3 -m portfolio.scanner
+
+      - name: Run portfolio agent tests
+        env:
+          IBKR_HOST: "127.0.0.1"
+          IBKR_PORT: "4002"
+          IBKR_CLIENT_ID: "1"
+          IBKR_CAPITAL: "1500"
+          OANDA_API_KEY: "test"
+          OANDA_ACCOUNT_ID: "test"
+          OANDA_CAPITAL: "500"
+          TOTAL_CAPITAL: "2000"
+          RISK_PER_TRADE: "0.01"
+          MIN_CONFIDENCE: "55"
+          MAX_POSITIONS: "10"
+          CASH_RESERVE_PCT: "0"
+          TELEGRAM_BOT_TOKEN: "test"
+          TELEGRAM_CHAT_ID: "test"
+        run: python3 -m agents.portfolio_agent
